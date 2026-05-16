@@ -43,7 +43,7 @@
               <div>
                 <div class="panel-title">本地数据更新</div>
                 <div class="description">
-                  全市场历史 K 线会从指定起始日拉取，已存在的同日同股票数据会被覆盖更新。
+                  默认会续跑补齐：已更新到最新的股票自动跳过，中途停止后再次点击会从缺口继续。强制覆盖重拉只建议在修复数据时使用。
                 </div>
               </div>
               <label class="field-label" for="backfillStartDate">
@@ -51,10 +51,10 @@
                 <input id="backfillStartDate" type="date" value="1990-01-01" />
               </label>
               <label class="checkbox-row" for="fullRefreshCheckbox">
-                <input id="fullRefreshCheckbox" type="checkbox" checked />
-                <span>从起始日重新更新全市场历史 K 线</span>
+                <input id="fullRefreshCheckbox" type="checkbox" />
+                <span>强制从起始日覆盖重拉（很慢）</span>
               </label>
-              <button id="backfillBtn">更新全市场历史 K 线</button>
+              <button id="backfillBtn">续跑/补齐全市场历史 K 线</button>
             </div>
 
             <div class="panel">

@@ -263,6 +263,24 @@ h1 {
   display: flex;
 }
 
+.job-progress {
+  grid-column: 1 / -1;
+}
+
+.job-progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e4e8ec;
+}
+
+.job-progress-bar {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+  transition: width 160ms ease;
+}
+
 .stock-browser {
   display: grid;
   grid-template-columns: minmax(440px, 0.9fr) minmax(360px, 1.1fr);

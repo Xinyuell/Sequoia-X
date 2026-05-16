@@ -57,7 +57,7 @@ function Stop-WebUI {
     if (Test-Path $PidFile) {
         $oldPid = (Get-Content $PidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
         if ($oldPid) {
-            taskkill /PID $oldPid /T /F 2>$null | Out-Null
+            Stop-Process -Id $oldPid -Force -ErrorAction SilentlyContinue
         }
         Remove-Item $PidFile -Force -ErrorAction SilentlyContinue
     }
@@ -218,4 +218,3 @@ catch {
 
 Write-Host ""
 Write-Host "已完成。可以关闭这个窗口。"
-

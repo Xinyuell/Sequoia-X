@@ -17,6 +17,21 @@ def test_job_manager_records_success() -> None:
     assert stored.finished_at is not None
 
 
+def test_job_manager_records_progress() -> None:
+    manager = InMemoryJobManager(run_async=False)
+
+    def work(progress):
+        progress(message="halfway", total=4, processed=2)
+        return {"ok": True}
+
+    job = manager.start("backfill", "queued", work)
+    stored = manager.get(job.job_id)
+
+    assert stored.status == "succeeded"
+    assert stored.progress == {"total": 4, "processed": 2}
+    assert stored.message == "backfill completed"
+
+
 def test_job_manager_records_failure() -> None:
     manager = InMemoryJobManager(run_async=False)
 

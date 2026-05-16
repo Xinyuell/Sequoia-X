@@ -1,8 +1,9 @@
 """Small in-memory job manager for local WebUI actions."""
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from inspect import Parameter, signature
 from threading import Lock, Thread
 from typing import Any, Literal
 from uuid import uuid4
@@ -28,6 +29,7 @@ class JobRecord:
     finished_at: datetime | None = None
     result: Any = None
     error: str | None = None
+    progress: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -39,6 +41,7 @@ class JobRecord:
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "result": self.result,
             "error": self.error,
+            "progress": self.progress,
         }
 
 
@@ -48,7 +51,7 @@ class InMemoryJobManager:
         self._jobs: dict[str, JobRecord] = {}
         self._lock = Lock()
 
-    def start(self, kind: str, message: str, work: Callable[[], Any]) -> JobRecord:
+    def start(self, kind: str, message: str, work: Callable[..., Any]) -> JobRecord:
         with self._lock:
             if any(job.status in {"queued", "running"} for job in self._jobs.values()):
                 raise JobAlreadyRunningError("A data job is already running")
@@ -75,15 +78,28 @@ class InMemoryJobManager:
             except KeyError as exc:
                 raise JobNotFoundError(job_id) from exc
 
-    def _run(self, job_id: str, work: Callable[[], Any]) -> None:
+    def update_progress(self, job_id: str, message: str | None = None, **progress: Any) -> None:
+        with self._lock:
+            job = self._jobs[job_id]
+            if message is not None:
+                job.message = message
+            job.progress.update({key: value for key, value in progress.items() if value is not None})
+
+    def _run(self, job_id: str, work: Callable[..., Any]) -> None:
         with self._lock:
             job = self._jobs[job_id]
             job.status = "running"
             job.started_at = datetime.now()
             job.message = f"{job.kind} is running"
 
+        def progress(message: str | None = None, **values: Any) -> None:
+            self.update_progress(job_id, message=message, **values)
+
         try:
-            result = work()
+            if _accepts_progress_callback(work):
+                result = work(progress)
+            else:
+                result = work()
         except Exception as exc:
             with self._lock:
                 job.status = "failed"
@@ -98,3 +114,21 @@ class InMemoryJobManager:
             job.message = f"{job.kind} completed"
             job.finished_at = datetime.now()
 
+
+def _accepts_progress_callback(work: Callable[..., Any]) -> bool:
+    try:
+        parameters = signature(work).parameters.values()
+    except (TypeError, ValueError):
+        return False
+
+    return any(
+        parameter.kind
+        in {
+            Parameter.POSITIONAL_ONLY,
+            Parameter.POSITIONAL_OR_KEYWORD,
+            Parameter.KEYWORD_ONLY,
+            Parameter.VAR_POSITIONAL,
+            Parameter.VAR_KEYWORD,
+        }
+        for parameter in parameters
+    )

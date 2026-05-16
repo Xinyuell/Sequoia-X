@@ -366,17 +366,40 @@ function setupCanvas(canvas) {
 }
 
 function renderJob(job) {
-  const fullJob = {
-    kind: job.kind || "--",
-    status: job.status || "--",
-    message: job.message || "任务已创建",
-    started_at: job.started_at || "--",
-    finished_at: job.finished_at || "--",
-    result: job.result ? JSON.stringify(job.result) : "--",
-    error: job.error || "--",
-  };
+  const progress = job.progress || {};
+  const total = Number(progress.total || 0);
+  const processed = Number(progress.processed || 0);
+  const progressPct = total > 0 ? Math.min(100, Math.round(processed / total * 100)) : null;
+  const fullJob = [
+    ["kind", jobKindLabel(job.kind)],
+    ["status", jobStatusLabel(job.status)],
+    ["message", job.message || "任务已创建"],
+    ["progress", progressPct === null ? "--" : `${formatNumber(processed)} / ${formatNumber(total)}（${progressPct}%）`],
+    ["current_symbol", progress.current_symbol || "--"],
+    ["current_action", progress.current_action || "--"],
+    ["current_start_date", progress.current_start_date || progress.start_date || "--"],
+    ["success", formatNumber(progress.success || 0)],
+    ["skipped", formatNumber(progress.skipped || 0)],
+    ["failed", formatNumber(progress.failed || 0)],
+    ["rows_written", formatNumber(progress.rows_written || 0)],
+    ["mode", progress.full_refresh ? "强制覆盖重拉" : "续跑补齐"],
+    ["started_at", job.started_at || "--"],
+    ["finished_at", job.finished_at || "--"],
+    ["result", formatJobResult(job.result)],
+    ["error", job.error || "--"],
+  ];
   byId("jobPanel").classList.remove("muted");
-  byId("jobPanel").innerHTML = Object.entries(fullJob)
+  byId("jobPanel").innerHTML = `
+    ${
+      progressPct === null
+        ? ""
+        : `<div class="job-progress">
+            <div class="job-progress-track">
+              <div class="job-progress-bar" style="width: ${progressPct}%"></div>
+            </div>
+          </div>`
+    }
+    ${fullJob
     .map(
       ([key, value]) => `
         <div>
@@ -385,7 +408,8 @@ function renderJob(job) {
         </div>
       `,
     )
-    .join("");
+    .join("")}
+  `;
 }
 
 function renderJobError(message) {
@@ -797,15 +821,60 @@ function showStrategyMessage(text, kind) {
 
 function jobLabel(key) {
   const labels = {
-    kind: "类型",
-    status: "状态",
-    message: "消息",
+    kind: "任务类型",
+    status: "运行状态",
+    message: "当前消息",
+    progress: "处理进度",
+    current_symbol: "当前股票",
+    current_action: "当前动作",
+    current_start_date: "本次起点",
+    success: "成功股票",
+    skipped: "跳过股票",
+    failed: "失败股票",
+    rows_written: "写入行数",
+    mode: "更新模式",
     started_at: "开始时间",
     finished_at: "结束时间",
-    result: "结果",
+    result: "最终结果",
     error: "错误",
   };
   return labels[key] || key;
+}
+
+function jobKindLabel(kind) {
+  return {
+    backfill: "历史 K 线更新",
+    sync: "每日增量更新",
+  }[kind] || kind || "--";
+}
+
+function jobStatusLabel(status) {
+  return {
+    queued: "排队中",
+    running: "运行中",
+    succeeded: "已完成",
+    failed: "失败",
+  }[status] || status || "--";
+}
+
+function formatJobResult(result) {
+  if (!result) {
+    return "--";
+  }
+  const labels = {
+    symbol_count: "股票总数",
+    success: "成功",
+    skipped: "跳过",
+    failed: "失败",
+    rows_written: "写入行数",
+    row_count: "写入行数",
+    start_date: "起始日期",
+    end_date: "结束日期",
+    full_refresh: "强制重拉",
+  };
+  return Object.entries(result)
+    .map(([key, value]) => `${labels[key] || key}: ${typeof value === "number" ? formatNumber(value) : value}`)
+    .join("，");
 }
 
 function formatNumber(value) {

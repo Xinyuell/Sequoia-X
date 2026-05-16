@@ -1,7 +1,9 @@
 """数据引擎模块：负责 SQLite 行情数据存储与 baostock 增量同步。"""
 
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -105,9 +107,21 @@ class DataEngine:
 
     @staticmethod
     def _to_baostock_code(symbol: str) -> str:
-        """将纯数字代码转为 baostock 格式：6/9开头 -> sh，其余 -> sz。"""
-        prefix = "sh" if symbol.startswith(("6", "9")) else "sz"
+        """将纯数字代码转为 baostock 格式；优先使用 stock_basic 中的原始交易所代码。"""
+        if symbol.startswith(("6", "9")):
+            prefix = "sh"
+        elif symbol.startswith(("4", "8")):
+            prefix = "bj"
+        else:
+            prefix = "sz"
         return f"{prefix}.{symbol}"
+
+    def _get_baostock_code_map(self) -> dict[str, str]:
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT symbol, code FROM stock_basic WHERE code IS NOT NULL AND code <> ''"
+            ).fetchall()
+        return {symbol: code for symbol, code in rows}
 
     # ── 数据同步 ──
 
@@ -117,6 +131,8 @@ class DataEngine:
         from multiprocessing import Pool
 
         today_str = date.today().strftime("%Y-%m-%d")
+
+        code_by_symbol = self._get_baostock_code_map()
 
         tasks = []
         with sqlite3.connect(self.db_path) as conn:
@@ -134,7 +150,7 @@ class DataEngine:
             start = today_str
             if last_date:
                 start = (date.fromisoformat(last_date) + timedelta(days=1)).strftime("%Y-%m-%d")
-            tasks.append((symbol, self._to_baostock_code(symbol), start, today_str))
+            tasks.append((symbol, code_by_symbol.get(symbol) or self._to_baostock_code(symbol), start, today_str))
 
         if not tasks:
             logger.info("所有股票已是最新，无需更新")
@@ -177,6 +193,7 @@ class DataEngine:
         symbols: list[str],
         start_date: str | None = None,
         full_refresh: bool = False,
+        progress_callback: Callable[..., None] | None = None,
     ) -> dict[str, int | str | bool]:
         """通过 baostock 批量回填历史日 K 线数据（后复权）。
 
@@ -195,6 +212,20 @@ class DataEngine:
         date.fromisoformat(effective_start_date)
         max_retries = 3
         reconnect_interval = 200  # 每处理 N 只股票重连一次
+        total = len(symbols)
+        code_by_symbol = self._get_baostock_code_map()
+
+        def _emit(message: str | None = None, **progress: Any) -> None:
+            if progress_callback is None:
+                return
+            progress_callback(
+                message=message,
+                total=total,
+                start_date=effective_start_date,
+                end_date=today_str,
+                full_refresh=full_refresh,
+                **progress,
+            )
 
         def _login():
             lg = bs.login()
@@ -203,12 +234,29 @@ class DataEngine:
                 return False
             return True
 
+        _emit(
+            "正在连接 baostock",
+            processed=0,
+            success=0,
+            skipped=0,
+            failed=0,
+            rows_written=0,
+        )
+
         if not _login():
+            _emit(
+                "baostock 登录失败，更新终止",
+                processed=0,
+                success=0,
+                skipped=0,
+                failed=total,
+                rows_written=0,
+            )
             return {
-                "symbol_count": len(symbols),
+                "symbol_count": total,
                 "success": 0,
                 "skipped": 0,
-                "failed": len(symbols),
+                "failed": total,
                 "rows_written": 0,
                 "start_date": effective_start_date,
                 "end_date": today_str,
@@ -223,12 +271,23 @@ class DataEngine:
 
         try:
             for i, symbol in enumerate(symbols):
+                processed = i
                 last_date = self._get_last_date(symbol)
                 if not full_refresh and last_date and last_date >= today_str:
                     skipped += 1
+                    _emit(
+                        f"已跳过 {symbol}，本地已是最新",
+                        processed=processed + 1,
+                        success=success,
+                        skipped=skipped,
+                        failed=failed,
+                        rows_written=rows_written,
+                        current_symbol=symbol,
+                        current_action="已是最新，跳过",
+                    )
                     if (i + 1) % 500 == 0:
                         logger.info(
-                            f"已处理 {i + 1}/{len(symbols)}，"
+                            f"已处理 {i + 1}/{total}，"
                             f"成功 {success} 跳过 {skipped} 失败 {failed}"
                         )
                     continue
@@ -243,6 +302,17 @@ class DataEngine:
 
                 if start > today_str:
                     skipped += 1
+                    _emit(
+                        f"已跳过 {symbol}，无需更新",
+                        processed=processed + 1,
+                        success=success,
+                        skipped=skipped,
+                        failed=failed,
+                        rows_written=rows_written,
+                        current_symbol=symbol,
+                        current_start_date=start,
+                        current_action="无需更新，跳过",
+                    )
                     continue
 
                 since_reconnect += 1
@@ -251,11 +321,22 @@ class DataEngine:
                     time.sleep(1)
                     if not _login():
                         logger.error("重连失败，终止回填")
+                        _emit(
+                            "baostock 重连失败，更新终止",
+                            processed=processed,
+                            success=success,
+                            skipped=skipped,
+                            failed=failed + total - i,
+                            rows_written=rows_written,
+                            current_symbol=symbol,
+                            current_start_date=start,
+                            current_action="重连失败",
+                        )
                         return {
-                            "symbol_count": len(symbols),
+                            "symbol_count": total,
                             "success": success,
                             "skipped": skipped,
-                            "failed": failed + len(symbols) - i,
+                            "failed": failed + total - i,
                             "rows_written": rows_written,
                             "start_date": effective_start_date,
                             "end_date": today_str,
@@ -263,7 +344,18 @@ class DataEngine:
                         }
                     since_reconnect = 0
 
-                bs_code = self._to_baostock_code(symbol)
+                bs_code = code_by_symbol.get(symbol) or self._to_baostock_code(symbol)
+                _emit(
+                    f"正在更新 {symbol}（{processed + 1}/{total}）",
+                    processed=processed,
+                    success=success,
+                    skipped=skipped,
+                    failed=failed,
+                    rows_written=rows_written,
+                    current_symbol=symbol,
+                    current_start_date=start,
+                    current_action="请求历史 K 线",
+                )
 
                 # 带重试的查询
                 rows = []
@@ -304,10 +396,32 @@ class DataEngine:
 
                 if not query_ok:
                     failed += 1
+                    _emit(
+                        f"{symbol} 更新失败，继续下一只",
+                        processed=processed + 1,
+                        success=success,
+                        skipped=skipped,
+                        failed=failed,
+                        rows_written=rows_written,
+                        current_symbol=symbol,
+                        current_start_date=start,
+                        current_action="查询失败",
+                    )
                     continue
 
                 if not rows:
                     skipped += 1
+                    _emit(
+                        f"{symbol} 无新增数据，已跳过",
+                        processed=processed + 1,
+                        success=success,
+                        skipped=skipped,
+                        failed=failed,
+                        rows_written=rows_written,
+                        current_symbol=symbol,
+                        current_start_date=start,
+                        current_action="无数据，跳过",
+                    )
                     continue
 
                 df = pd.DataFrame(rows, columns=rs.fields)
@@ -318,6 +432,17 @@ class DataEngine:
 
                 if df.empty:
                     skipped += 1
+                    _emit(
+                        f"{symbol} 无有效交易数据，已跳过",
+                        processed=processed + 1,
+                        success=success,
+                        skipped=skipped,
+                        failed=failed,
+                        rows_written=rows_written,
+                        current_symbol=symbol,
+                        current_start_date=start,
+                        current_action="无有效数据，跳过",
+                    )
                     continue
 
                 df["symbol"] = symbol
@@ -337,10 +462,22 @@ class DataEngine:
 
                 success += 1
                 rows_written += len(df)
+                _emit(
+                    f"已写入 {symbol}：{len(df)} 行",
+                    processed=processed + 1,
+                    success=success,
+                    skipped=skipped,
+                    failed=failed,
+                    rows_written=rows_written,
+                    current_symbol=symbol,
+                    current_start_date=start,
+                    current_action="写入完成",
+                    current_rows=len(df),
+                )
 
                 if (i + 1) % 500 == 0:
                     logger.info(
-                        f"已处理 {i + 1}/{len(symbols)}，"
+                        f"已处理 {i + 1}/{total}，"
                         f"成功 {success} 跳过 {skipped} 失败 {failed}"
                     )
 
@@ -348,8 +485,17 @@ class DataEngine:
             bs.logout()
 
         logger.info(f"回填完成 — 成功: {success} | 跳过: {skipped} | 失败: {failed}")
+        _emit(
+            "历史 K 线更新完成",
+            processed=total,
+            success=success,
+            skipped=skipped,
+            failed=failed,
+            rows_written=rows_written,
+            current_action="完成",
+        )
         return {
-            "symbol_count": len(symbols),
+            "symbol_count": total,
             "success": success,
             "skipped": skipped,
             "failed": failed,

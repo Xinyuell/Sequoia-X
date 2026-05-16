@@ -71,28 +71,53 @@ def create_api_router() -> APIRouter:
         payload = payload or BackfillRequest()
         start_date = payload.start_date.isoformat() if payload.start_date else None
 
-        def work() -> dict[str, Any]:
+        def work(progress: Any) -> dict[str, Any]:
+            progress(
+                message="正在同步全市场股票列表",
+                total=0,
+                processed=0,
+                success=0,
+                skipped=0,
+                failed=0,
+                rows_written=0,
+                full_refresh=payload.full_refresh,
+                start_date=start_date,
+            )
             symbols = engine.get_all_symbols()
+            progress(
+                message="已获取全市场股票列表，开始更新历史 K 线",
+                total=len(symbols),
+                processed=0,
+                success=0,
+                skipped=0,
+                failed=0,
+                rows_written=0,
+                full_refresh=payload.full_refresh,
+                start_date=start_date,
+            )
             result = engine.backfill(
                 symbols,
                 start_date=start_date,
                 full_refresh=payload.full_refresh,
+                progress_callback=progress,
             )
             if result is None:
                 return {"symbol_count": len(symbols)}
             return dict(result)
 
-        return _start_job(request, "backfill", "Historical backfill queued", work)
+        return _start_job(request, "backfill", "历史 K 线更新已排队", work)
 
     @router.post("/data/sync")
     def start_sync(request: Request) -> dict[str, str]:
         engine = _engine(request)
 
-        def work() -> dict[str, Any]:
+        def work(progress: Any) -> dict[str, Any]:
+            progress(message="正在执行每日增量更新")
             count = engine.sync_today_bulk()
+            progress(message="每日增量更新完成", rows_written=count)
             return {"row_count": count}
 
-        return _start_job(request, "sync", "Incremental sync queued", work)
+        return _start_job(request, "sync", "每日增量更新已排队", work)
 
     @router.get("/jobs/{job_id}")
     def job_status(request: Request, job_id: str) -> dict[str, Any]:

@@ -136,8 +136,20 @@ def test_backfill_api_passes_start_date_and_full_refresh(tmp_path) -> None:
         def get_all_symbols(self) -> list[str]:
             return ["000001", "600000"]
 
-        def backfill(self, symbols, start_date=None, full_refresh=False):
-            self.calls.append((symbols, start_date, full_refresh))
+        def backfill(self, symbols, start_date=None, full_refresh=False, progress_callback=None):
+            self.calls.append((symbols, start_date, full_refresh, progress_callback is not None))
+            if progress_callback is not None:
+                progress_callback(
+                    message="fake progress",
+                    total=len(symbols),
+                    processed=1,
+                    success=1,
+                    skipped=0,
+                    failed=0,
+                    rows_written=6,
+                    current_symbol="000001",
+                    current_action="写入完成",
+                )
             return {
                 "symbol_count": len(symbols),
                 "success": 2,
@@ -166,7 +178,9 @@ def test_backfill_api_passes_start_date_and_full_refresh(tmp_path) -> None:
     job = client.get(f"/api/jobs/{response.json()['job_id']}").json()
     assert job["status"] == "succeeded"
     assert job["result"]["rows_written"] == 12
-    assert engine.calls == [(["000001", "600000"], "1990-01-01", True)]
+    assert job["progress"]["processed"] == 1
+    assert job["progress"]["current_symbol"] == "000001"
+    assert engine.calls == [(["000001", "600000"], "1990-01-01", True, True)]
 
 
 def test_api_lists_local_stocks_with_names(tmp_path) -> None:
