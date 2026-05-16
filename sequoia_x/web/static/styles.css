@@ -224,7 +224,7 @@ h1 {
 
 .data-update-panel {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) 180px minmax(220px, auto) auto;
+  grid-template-columns: minmax(260px, 1fr) 170px minmax(240px, 320px) minmax(220px, auto) auto;
   gap: 14px;
   align-items: end;
   margin-bottom: 16px;

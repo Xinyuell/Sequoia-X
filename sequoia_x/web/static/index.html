@@ -50,6 +50,14 @@
                 起始日期
                 <input id="backfillStartDate" type="date" value="1990-01-01" />
               </label>
+              <label class="field-label" for="backfillSource">
+                数据源
+                <select id="backfillSource">
+                  <option value="auto">自动：Baostock 优先，失败时尝试 Tushare</option>
+                  <option value="baostock">仅 Baostock</option>
+                  <option value="tushare">仅 Tushare</option>
+                </select>
+              </label>
               <label class="checkbox-row" for="fullRefreshCheckbox">
                 <input id="fullRefreshCheckbox" type="checkbox" />
                 <span>强制从起始日覆盖重拉（很慢）</span>

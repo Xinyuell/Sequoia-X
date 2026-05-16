@@ -48,29 +48,36 @@ CREATE INDEX IF NOT EXISTS idx_stock_basic_name ON stock_basic (name);
 """
 
 
+def _query_bs_history_logged_in(bs, bs_code: str, start: str, end: str) -> list:
+    rs = bs.query_history_k_data_plus(
+        bs_code,
+        "date,open,high,low,close,volume,amount",
+        start_date=start,
+        end_date=end,
+        frequency="d",
+        adjustflag="1",
+    )
+    if rs.error_code != "0":
+        raise RuntimeError(rs.error_msg)
+    rows = []
+    while rs.next():
+        rows.append(rs.get_row_data())
+    return rows
+
+
 def _query_bs_with_timeout(bs, bs_code: str, start: str, end: str, timeout: int = 30):
-    """在独立线程中执行 baostock 查询，超时抛出 TimeoutError。"""
+    """在独立线程中执行 baostock 查询，超时抛出 TimeoutError。
+
+    这个轻量路径只用于已经运行在独立进程内的批量增量同步 worker。
+    WebUI 历史回填使用 _BaostockHistorySession，超时会硬终止子进程。
+    """
     import threading
 
     result = [None, None]
 
     def _query():
         try:
-            rs = bs.query_history_k_data_plus(
-                bs_code,
-                "date,open,high,low,close,volume,amount",
-                start_date=start,
-                end_date=end,
-                frequency="d",
-                adjustflag="1",
-            )
-            if rs.error_code != "0":
-                result[0] = RuntimeError(rs.error_msg)
-                return
-            rows = []
-            while rs.next():
-                rows.append(rs.get_row_data())
-            result[1] = rows
+            result[1] = _query_bs_history_logged_in(bs, bs_code, start, end)
         except Exception as exc:
             result[0] = exc
 
@@ -82,6 +89,137 @@ def _query_bs_with_timeout(bs, bs_code: str, start: str, end: str, timeout: int 
     if result[0] is not None:
         raise result[0]
     return result[1]
+
+
+def _bs_history_session_worker(task_queue, result_queue) -> None:
+    import baostock as bs
+
+    lg = bs.login()
+    if lg.error_code != "0":
+        result_queue.put(("__ready__", "error", f"baostock 登录失败: {lg.error_msg}"))
+        return
+
+    result_queue.put(("__ready__", "ok", None))
+    try:
+        while True:
+            task = task_queue.get()
+            if task is None:
+                return
+
+            task_id, bs_code, start, end = task
+            try:
+                rows = _query_bs_history_logged_in(bs, bs_code, start, end)
+            except Exception as exc:
+                result_queue.put((task_id, "error", str(exc)))
+            else:
+                result_queue.put((task_id, "ok", rows))
+    finally:
+        try:
+            bs.logout()
+        except Exception:
+            pass
+
+
+class _BaostockHistorySession:
+    """Run baostock history queries in a killable child process."""
+
+    def __init__(self, timeout: float = 30, worker_target: Callable[..., None] | None = None) -> None:
+        from multiprocessing import get_context
+
+        self.timeout = timeout
+        self.worker_target = worker_target or _bs_history_session_worker
+        self._ctx = get_context("spawn")
+        self._process = None
+        self._task_queue = None
+        self._result_queue = None
+        self._task_seq = 0
+
+    def start(self) -> None:
+        self._ensure_worker()
+
+    def restart(self) -> None:
+        self._terminate_worker()
+        self._start_worker()
+
+    def query(self, bs_code: str, start: str, end: str) -> list:
+        from queue import Empty
+
+        self._ensure_worker()
+        self._task_seq += 1
+        task_id = f"history-{self._task_seq}"
+        self._task_queue.put((task_id, bs_code, start, end))
+
+        try:
+            while True:
+                response_id, status, payload = self._result_queue.get(timeout=self.timeout)
+                if response_id != task_id:
+                    continue
+                break
+        except Empty as exc:
+            self._terminate_worker()
+            raise TimeoutError(f"baostock 查询超时 ({self.timeout}s): {bs_code} {start}~{end}") from exc
+
+        if status == "ok":
+            return payload
+        raise RuntimeError(str(payload))
+
+    def close(self) -> None:
+        process = self._process
+        if process is not None and process.is_alive() and self._task_queue is not None:
+            try:
+                self._task_queue.put(None)
+                process.join(timeout=2)
+            except Exception:
+                pass
+        self._terminate_worker()
+
+    def _ensure_worker(self) -> None:
+        if self._process is None or not self._process.is_alive():
+            self._start_worker()
+
+    def _start_worker(self) -> None:
+        from queue import Empty
+
+        self._task_queue = self._ctx.Queue()
+        self._result_queue = self._ctx.Queue()
+        self._process = self._ctx.Process(
+            target=self.worker_target,
+            args=(self._task_queue, self._result_queue),
+            daemon=True,
+        )
+        self._process.start()
+
+        try:
+            response_id, status, payload = self._result_queue.get(timeout=self.timeout)
+        except Empty as exc:
+            self._terminate_worker()
+            raise TimeoutError(f"baostock worker 启动超时 ({self.timeout}s)") from exc
+
+        if response_id != "__ready__" or status != "ok":
+            self._terminate_worker()
+            raise RuntimeError(str(payload or "baostock worker 启动失败"))
+
+    def _terminate_worker(self) -> None:
+        process = self._process
+        if process is not None and process.is_alive():
+            process.terminate()
+            process.join(timeout=2)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=1)
+
+        for queue in (self._task_queue, self._result_queue):
+            if queue is None:
+                continue
+            try:
+                queue.cancel_join_thread()
+                queue.close()
+            except Exception:
+                pass
+
+        self._process = None
+        self._task_queue = None
+        self._result_queue = None
 
 
 def _bs_fetch_batch(tasks: list) -> list:
@@ -429,14 +567,14 @@ class DataEngine:
         yesterday_str = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
         effective_start_date = start_date or self.start_date
         date.fromisoformat(effective_start_date)
-        total = len(symbols)
+        requested_total = len(symbols)
 
         def _emit(message: str | None = None, **progress: Any) -> None:
             if progress_callback is None:
                 return
             progress_callback(
                 message=message,
-                total=total,
+                total=requested_total,
                 start_date=effective_start_date,
                 end_date=today_str,
                 full_refresh=full_refresh,
@@ -451,14 +589,14 @@ class DataEngine:
                 effective_start_date,
                 today_str,
                 full_refresh,
-                total,
+                requested_total,
                 _emit,
             )
             return result or {
-                "symbol_count": total,
+                "symbol_count": requested_total,
                 "success": 0,
                 "skipped": 0,
-                "failed": total,
+                "failed": requested_total,
                 "rows_written": 0,
                 "start_date": effective_start_date,
                 "end_date": today_str,
@@ -466,18 +604,10 @@ class DataEngine:
                 "failed_symbols": [],
             }
 
-        import baostock as bs
-
         max_retries = 2
         reconnect_interval = 100
+        query_timeout = 15
         code_by_symbol = self._get_baostock_code_map()
-
-        def _login():
-            lg = bs.login()
-            if lg.error_code != "0":
-                logger.error(f"baostock 登录失败: {lg.error_msg}")
-                return False
-            return True
 
         _emit(
             "正在连接 baostock",
@@ -488,15 +618,18 @@ class DataEngine:
             rows_written=0,
         )
 
-        if not _login():
+        history_session = _BaostockHistorySession(timeout=query_timeout)
+        try:
+            history_session.start()
+        except Exception as exc:
             # Baostock 登录失败，尝试用 Tushare 全量接管
-            logger.warning("Baostock 登录失败，尝试 Tushare 接管回填")
+            logger.warning(f"Baostock 连接失败，尝试 Tushare 接管回填: {exc}")
             result = self._ts_backfill_all(
                 symbols,
                 effective_start_date,
                 today_str,
                 full_refresh,
-                total,
+                requested_total,
                 _emit,
             )
             if result is not None:
@@ -506,14 +639,14 @@ class DataEngine:
                 processed=0,
                 success=0,
                 skipped=0,
-                failed=total,
+                failed=requested_total,
                 rows_written=0,
             )
             return {
-                "symbol_count": total,
+                "symbol_count": requested_total,
                 "success": 0,
                 "skipped": 0,
-                "failed": total,
+                "failed": requested_total,
                 "rows_written": 0,
                 "start_date": effective_start_date,
                 "end_date": today_str,
@@ -521,36 +654,36 @@ class DataEngine:
                 "failed_symbols": symbols,
             }
 
-        # 预过滤：一条 SQL 找出真正需要更新的股票，避免逐只检查 5000+ 只
-        if full_refresh:
-            working_symbols = list(symbols)
-            last_date_map: dict[str, str | None] = {}
-            skipped_before = 0
-        else:
-            working_symbols, last_date_map = self._get_stale_symbols(symbols, yesterday_str)
-            skipped_before = total - len(working_symbols)
-            if skipped_before > 0:
-                logger.info(
-                    f"预过滤：{skipped_before} 只已是最新，{len(working_symbols)} 只需要更新"
-                )
-                _emit(
-                    f"预过滤完成，{len(working_symbols)} 只需要更新",
-                    processed=skipped_before,
-                    success=0,
-                    skipped=skipped_before,
-                    failed=0,
-                    rows_written=0,
-                )
-
-        total = len(working_symbols)
-        success = 0
-        skipped = 0
-        failed = 0
-        rows_written = 0
-        since_reconnect = 0
-        failed_symbols: list[str] = []
-
         try:
+            # 预过滤：一条 SQL 找出真正需要更新的股票，避免逐只检查 5000+ 只
+            if full_refresh:
+                working_symbols = list(symbols)
+                last_date_map: dict[str, str | None] = {}
+                skipped_before = 0
+            else:
+                working_symbols, last_date_map = self._get_stale_symbols(symbols, yesterday_str)
+                skipped_before = requested_total - len(working_symbols)
+                if skipped_before > 0:
+                    logger.info(
+                        f"预过滤：{skipped_before} 只已是最新，{len(working_symbols)} 只需要更新"
+                    )
+                    _emit(
+                        f"预过滤完成，{len(working_symbols)} 只需要更新",
+                        processed=skipped_before,
+                        success=0,
+                        skipped=skipped_before,
+                        failed=0,
+                        rows_written=0,
+                    )
+
+            working_total = len(working_symbols)
+            success = 0
+            skipped = 0
+            failed = 0
+            rows_written = 0
+            since_reconnect = 0
+            failed_symbols: list[str] = []
+
             for i, symbol in enumerate(working_symbols):
                 processed = skipped_before + i
                 last_date = last_date_map.get(symbol) if not full_refresh else None
@@ -579,11 +712,12 @@ class DataEngine:
 
                 since_reconnect += 1
                 if since_reconnect >= reconnect_interval:
-                    bs.logout()
                     time.sleep(1)
-                    if not _login():
-                        logger.error("重连失败，终止回填")
-                        remaining_failed = [working_symbols[j] for j in range(i, total)]
+                    try:
+                        history_session.restart()
+                    except Exception as exc:
+                        logger.error(f"重连失败，终止回填: {exc}")
+                        remaining_failed = [working_symbols[j] for j in range(i, working_total)]
                         failed_symbols.extend(remaining_failed)
                         self._save_failed_symbols(failed_symbols)
                         _emit(
@@ -598,7 +732,7 @@ class DataEngine:
                             current_action="重连失败",
                         )
                         return {
-                            "symbol_count": total,
+                            "symbol_count": requested_total,
                             "success": success,
                             "skipped": skipped,
                             "failed": failed + len(remaining_failed),
@@ -612,7 +746,7 @@ class DataEngine:
 
                 bs_code = code_by_symbol.get(symbol) or self._to_baostock_code(symbol)
                 _emit(
-                    f"正在更新 {symbol}（{processed + 1}/{total}）",
+                    f"正在更新 {symbol}（{processed + 1}/{requested_total}）",
                     processed=processed,
                     success=success,
                     skipped=skipped,
@@ -628,9 +762,7 @@ class DataEngine:
                 query_ok = False
                 for attempt in range(max_retries):
                     try:
-                        rows = _query_bs_with_timeout(
-                            bs, bs_code, start, today_str, timeout=15
-                        )
+                        rows = history_session.query(bs_code, start, today_str)
                         query_ok = True
                         break
                     except TimeoutError:
@@ -640,9 +772,10 @@ class DataEngine:
                                 f"[{symbol}] 第{attempt + 1}次超时，{wait}s 后重试"
                             )
                             time.sleep(wait)
-                            bs.logout()
-                            time.sleep(1)
-                            _login()
+                            try:
+                                history_session.restart()
+                            except Exception as exc:
+                                logger.warning(f"[{symbol}] baostock 重启失败: {exc}")
                         else:
                             logger.warning(f"[{symbol}] {max_retries}次均超时，跳过")
                     except Exception as exc:
@@ -652,9 +785,10 @@ class DataEngine:
                                 f"[{symbol}] 第{attempt + 1}次失败: {exc}，{wait}s 后重试"
                             )
                             time.sleep(wait)
-                            bs.logout()
-                            time.sleep(1)
-                            _login()
+                            try:
+                                history_session.restart()
+                            except Exception as restart_exc:
+                                logger.warning(f"[{symbol}] baostock 重启失败: {restart_exc}")
                         else:
                             logger.warning(f"[{symbol}] {max_retries}次重试均失败，跳过")
 
@@ -684,7 +818,7 @@ class DataEngine:
                         )
                         if (i + 1) % 500 == 0:
                             logger.info(
-                                f"已处理 {i + 1}/{total}，"
+                                f"已处理 {i + 1}/{working_total}，"
                                 f"成功 {success} 跳过 {skipped} 失败 {failed}"
                             )
                         time.sleep(0.3)
@@ -775,17 +909,17 @@ class DataEngine:
 
                 if (i + 1) % 500 == 0:
                     logger.info(
-                        f"已处理 {i + 1}/{total}，"
+                        f"已处理 {i + 1}/{working_total}，"
                         f"成功 {success} 跳过 {skipped} 失败 {failed}"
                     )
 
                 time.sleep(0.3)
 
         finally:
-            bs.logout()
+            history_session.close()
 
         total_skipped = skipped_before + skipped
-        total_processed = total + skipped_before
+        total_processed = requested_total
         if failed_symbols:
             self._save_failed_symbols(failed_symbols)
         logger.info(

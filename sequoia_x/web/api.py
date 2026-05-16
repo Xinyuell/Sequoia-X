@@ -3,7 +3,7 @@
 import sqlite3
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -27,6 +27,7 @@ class StrategyRunRequest(BaseModel):
 class BackfillRequest(BaseModel):
     start_date: date | None = None
     full_refresh: bool = False
+    source: Literal["auto", "tushare", "baostock"] = "auto"
 
 
 def create_api_router() -> APIRouter:
@@ -101,6 +102,7 @@ def create_api_router() -> APIRouter:
                 start_date=start_date,
                 full_refresh=payload.full_refresh,
                 progress_callback=progress,
+                source=payload.source,
             )
             if result is None:
                 return {"symbol_count": len(symbols)}

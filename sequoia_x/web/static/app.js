@@ -82,6 +82,7 @@ function startBackfillJob() {
   startDataJob("/api/data/backfill", {
     start_date: startDate,
     full_refresh: byId("fullRefreshCheckbox").checked,
+    source: byId("backfillSource").value,
   });
 }
 
@@ -422,6 +423,7 @@ function setDataButtonsDisabled(disabled) {
   byId("syncBtn").disabled = disabled;
   byId("backfillBtn").disabled = disabled;
   byId("backfillStartDate").disabled = disabled;
+  byId("backfillSource").disabled = disabled;
   byId("fullRefreshCheckbox").disabled = disabled;
 }
 
