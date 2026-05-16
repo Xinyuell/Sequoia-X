@@ -2,6 +2,7 @@
 
 import sqlite3
 from collections.abc import Callable
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,12 @@ CREATE TABLE IF NOT EXISTS stock_basic (
 _CREATE_STOCK_BASIC_NAME_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_stock_basic_name ON stock_basic (name);
 """
+
+
+def _latest_weekday_on_or_before(value: date) -> date:
+    while value.weekday() >= 5:
+        value -= timedelta(days=1)
+    return value
 
 
 def _query_bs_history_logged_in(bs, bs_code: str, start: str, end: str) -> list:
@@ -455,11 +462,22 @@ class DataEngine:
 
     # ── 数据同步 ──
 
-    def sync_today_bulk(self) -> int:
+    def sync_today_bulk(self, today_str: str | None = None) -> int:
         """增量同步当日数据：Tushare 优先（1 次调用），Baostock 多进程容灾。"""
-        from datetime import date
+        today = date.fromisoformat(today_str) if today_str else date.today()
+        today_str = today.isoformat()
+        latest_local_date = self._get_latest_local_date()
 
-        today_str = date.today().strftime("%Y-%m-%d")
+        if latest_local_date and latest_local_date >= today_str:
+            logger.info(f"本地数据已包含 {today_str}，无需每日增量更新")
+            return 0
+
+        latest_expected_trade_date = _latest_weekday_on_or_before(today).isoformat()
+        if today.weekday() >= 5 and latest_local_date and latest_local_date >= latest_expected_trade_date:
+            logger.info(
+                f"{today_str} 是周末，且本地已更新到 {latest_local_date}，无需每日增量更新"
+            )
+            return 0
 
         # 先尝试 Tushare（1 次 API 调用获取全市场当日数据）
         df = self._ts_fetch_daily_all(today_str)
@@ -473,6 +491,11 @@ class DataEngine:
 
         logger.info("Tushare 不可用，回退到 Baostock 多进程增量同步")
         return self._bs_sync_today_bulk(today_str)
+
+    def _get_latest_local_date(self) -> str | None:
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT MAX(date) FROM stock_daily").fetchone()
+        return row[0] if row and row[0] else None
 
     def _bs_sync_today_bulk(self, today_str: str) -> int:
         """Baostock 多进程增量同步。"""
