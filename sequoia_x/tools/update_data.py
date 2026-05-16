@@ -27,6 +27,12 @@ def main() -> None:
         action="store_true",
         help="Re-fetch data from start date instead of only filling missing days",
     )
+    parser.add_argument(
+        "--source",
+        choices=["auto", "tushare", "baostock"],
+        default="auto",
+        help="Data source: auto (baostock primary, tushare fallback), tushare, or baostock",
+    )
     args = parser.parse_args()
 
     load_dotenv()
@@ -44,6 +50,7 @@ def main() -> None:
             start_date=args.start_date or settings.start_date,
             full_refresh=args.full_refresh,
             progress_callback=_make_progress_printer("Historical backfill"),
+            source=args.source,
         )
         _print_result("Historical backfill", result)
         return
@@ -60,6 +67,7 @@ def main() -> None:
             symbols,
             start_date=args.start_date or settings.start_date,
             progress_callback=_make_progress_printer("Initial backfill"),
+            source=args.source,
         )
         _print_result("Initial backfill", result)
         return
@@ -75,6 +83,7 @@ def main() -> None:
             symbols,
             start_date=args.start_date or settings.start_date,
             progress_callback=_make_progress_printer("Resume backfill"),
+            source=args.source,
         )
         _print_result("Resume backfill", result)
         return

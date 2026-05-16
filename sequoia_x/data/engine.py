@@ -87,6 +87,8 @@ class DataEngine:
     def __init__(self, settings: Settings) -> None:
         self.db_path: str = settings.db_path
         self.start_date: str = settings.start_date
+        self.tushare_token: str = settings.tushare_token
+        self._ts_pro = None
         self._init_db()
 
     def _init_db(self) -> None:
@@ -106,6 +108,149 @@ class DataEngine:
                 (symbol,),
             ).fetchone()
         return row[0] if row and row[0] else None
+
+    def _get_stale_symbols(
+        self, symbols: list[str], before_date: str
+    ) -> tuple[list[str], dict[str, str | None]]:
+        """用一条 SQL 找出需要更新的股票及其最后数据日期。
+
+        Returns:
+            (stale_symbols, last_date_map): 需要更新的股票列表，以及每只股票的最后日期（None 表示无数据）
+        """
+        if not symbols:
+            return [], {}
+        placeholders = ",".join(["?"] * len(symbols))
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                f"""
+                SELECT symbol, MAX(date) AS last_date
+                FROM stock_daily
+                WHERE symbol IN ({placeholders})
+                GROUP BY symbol
+                """,
+                symbols,
+            ).fetchall()
+        date_map: dict[str, str | None] = {row[0]: row[1] for row in rows}
+        stale = [s for s in symbols if date_map.get(s, None) is None or date_map[s] < before_date]
+        for s in symbols:
+            if s not in date_map:
+                date_map[s] = None
+        return stale, date_map
+
+    # ── Tushare 数据源 ──
+
+    @staticmethod
+    def _ts_code(symbol: str) -> str:
+        """将纯数字代码转为 Tushare 格式。"""
+        if symbol.startswith(("6", "9")):
+            return f"{symbol}.SH"
+        if symbol.startswith(("4", "8")):
+            return f"{symbol}.BJ"
+        return f"{symbol}.SZ"
+
+    def _get_ts_pro(self):
+        """懒初始化 Tushare Pro 客户端，未配置 token 返回 None。"""
+        if not self.tushare_token:
+            return None
+        if self._ts_pro is None:
+            import tushare as ts
+
+            ts.set_token(self.tushare_token)
+            self._ts_pro = ts.pro_api()
+        return self._ts_pro
+
+    def _ts_fetch_stock_list(self) -> list[dict[str, str]] | None:
+        """通过 Tushare 获取全市场 A 股列表。失败返回 None。"""
+        pro = self._get_ts_pro()
+        if pro is None:
+            return None
+        try:
+            df = pro.stock_basic(
+                exchange="",
+                list_status="L",
+                fields="ts_code,symbol,name",
+            )
+            if df is None or df.empty:
+                return None
+            records: list[dict[str, str]] = []
+            for _, row in df.iterrows():
+                records.append(
+                    {
+                        "symbol": str(row["symbol"]),
+                        "code": str(row["ts_code"]),
+                        "name": str(row["name"]),
+                        "status": "1",
+                        "stock_type": "1",
+                    }
+                )
+            logger.info(f"Tushare 获取股票列表完成，共 {len(records)} 只")
+            return records
+        except Exception as exc:
+            logger.warning(f"Tushare 获取股票列表失败: {exc}")
+            return None
+
+    def _ts_fetch_history(
+        self, symbol: str, start_date: str, end_date: str
+    ) -> pd.DataFrame | None:
+        """通过 Tushare 获取单只股票历史日 K 线（后复权）。失败返回 None。"""
+        pro = self._get_ts_pro()
+        if pro is None:
+            return None
+        try:
+            ts_code = self._ts_code(symbol)
+            df = pro.daily(
+                ts_code=ts_code,
+                start_date=start_date.replace("-", ""),
+                end_date=end_date.replace("-", ""),
+                fields="trade_date,open,high,low,close,vol,amount",
+            )
+            if df is None or df.empty:
+                return None
+            df = df.rename(
+                columns={
+                    "trade_date": "date",
+                    "vol": "volume",
+                    "amount": "turnover",
+                }
+            )
+            df["symbol"] = symbol
+            df["date"] = pd.to_datetime(df["date"], format="%Y%m%d").dt.strftime("%Y-%m-%d")
+            for col in ["open", "high", "low", "close", "volume", "turnover"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.dropna(subset=["close"])
+            df = df[df["volume"] > 0]
+            return df[["symbol", "date", "open", "high", "low", "close", "volume", "turnover"]]
+        except Exception as exc:
+            logger.warning(f"[{symbol}] Tushare 获取历史数据失败: {exc}")
+            return None
+
+    def _ts_fetch_daily_all(self, trade_date: str) -> pd.DataFrame | None:
+        """通过 Tushare 获取全市场某一天的日 K 线数据。失败返回 None。"""
+        pro = self._get_ts_pro()
+        if pro is None:
+            return None
+        try:
+            df = pro.daily(trade_date=trade_date.replace("-", ""))
+            if df is None or df.empty:
+                return None
+            df = df.rename(
+                columns={
+                    "ts_code": "code",
+                    "trade_date": "date",
+                    "vol": "volume",
+                    "amount": "turnover",
+                }
+            )
+            df["symbol"] = df["code"].str.split(".").str[1]
+            df["date"] = pd.to_datetime(df["date"], format="%Y%m%d").dt.strftime("%Y-%m-%d")
+            for col in ["open", "high", "low", "close", "volume", "turnover"]:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.dropna(subset=["close"])
+            df = df[df["volume"] > 0]
+            return df[["symbol", "date", "open", "high", "low", "close", "volume", "turnover"]]
+        except Exception as exc:
+            logger.warning(f"Tushare 获取每日全量数据失败: {exc}")
+            return None
 
     def get_ohlcv(self, symbol: str, end_date: str | None = None) -> pd.DataFrame:
         with sqlite3.connect(self.db_path) as conn:
@@ -144,11 +289,28 @@ class DataEngine:
     # ── 数据同步 ──
 
     def sync_today_bulk(self) -> int:
-        """多进程并行通过 baostock 拉取增量数据（后复权），写入 SQLite。"""
-        from datetime import date, timedelta
-        from multiprocessing import Pool
+        """增量同步当日数据：Tushare 优先（1 次调用），Baostock 多进程容灾。"""
+        from datetime import date
 
         today_str = date.today().strftime("%Y-%m-%d")
+
+        # 先尝试 Tushare（1 次 API 调用获取全市场当日数据）
+        df = self._ts_fetch_daily_all(today_str)
+        if df is not None and not df.empty:
+            count = len(df)
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM stock_daily WHERE date = ?", (today_str,))
+            self._write_ohlcv_df(df)
+            logger.info(f"sync_today_bulk (Tushare): 写入 {count} 条数据")
+            return count
+
+        logger.info("Tushare 不可用，回退到 Baostock 多进程增量同步")
+        return self._bs_sync_today_bulk(today_str)
+
+    def _bs_sync_today_bulk(self, today_str: str) -> int:
+        """Baostock 多进程增量同步。"""
+        from datetime import date, timedelta
+        from multiprocessing import Pool
 
         code_by_symbol = self._get_baostock_code_map()
 
@@ -168,7 +330,14 @@ class DataEngine:
             start = today_str
             if last_date:
                 start = (date.fromisoformat(last_date) + timedelta(days=1)).strftime("%Y-%m-%d")
-            tasks.append((symbol, code_by_symbol.get(symbol) or self._to_baostock_code(symbol), start, today_str))
+            tasks.append(
+                (
+                    symbol,
+                    code_by_symbol.get(symbol) or self._to_baostock_code(symbol),
+                    start,
+                    today_str,
+                )
+            )
 
         if not tasks:
             logger.info("所有股票已是最新，无需更新")
@@ -190,7 +359,10 @@ class DataEngine:
             logger.info("无新数据（可能非交易日）")
             return 0
 
-        df = pd.DataFrame(all_rows, columns=["symbol", "date", "open", "high", "low", "close", "volume", "turnover"])
+        df = pd.DataFrame(
+            all_rows,
+            columns=["symbol", "date", "open", "high", "low", "close", "volume", "turnover"],
+        )
         for col in ["open", "high", "low", "close", "volume", "turnover"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.dropna(subset=["close"])
@@ -203,7 +375,7 @@ class DataEngine:
             df.to_sql("stock_daily", conn, if_exists="append", index=False, method="multi", chunksize=500)
             conn.commit()
 
-        logger.info(f"sync_today_bulk: 写入 {count} 条数据")
+        logger.info(f"sync_today_bulk (Baostock): 写入 {count} 条数据")
         return count
 
     def backfill(
@@ -212,26 +384,22 @@ class DataEngine:
         start_date: str | None = None,
         full_refresh: bool = False,
         progress_callback: Callable[..., None] | None = None,
+        source: str = "auto",
     ) -> dict[str, int | str | bool]:
-        """通过 baostock 批量回填历史日 K 线数据（后复权）。
+        """批量回填历史日 K 线数据（后复权），支持双数据源。
 
-        容错机制：
-        - 单只股票失败自动重试 3 次，间隔递增（2s/4s/8s）
-        - 每 200 只股票自动重连 baostock（防止长连接超时）
-        - 已入库的自动 skip，中断后可重跑续传
+        source:
+          - "auto": Baostock 优先，Tushare 容灾（默认）
+          - "tushare": 强制 Tushare
+          - "baostock": 仅 Baostock，不启用 Tushare 容灾
         """
         import time
         from datetime import date, timedelta
 
-        import baostock as bs
-
         today_str = date.today().strftime("%Y-%m-%d")
         effective_start_date = start_date or self.start_date
         date.fromisoformat(effective_start_date)
-        max_retries = 3
-        reconnect_interval = 100  # 每处理 N 只股票重连一次
         total = len(symbols)
-        code_by_symbol = self._get_baostock_code_map()
 
         def _emit(message: str | None = None, **progress: Any) -> None:
             if progress_callback is None:
@@ -244,6 +412,34 @@ class DataEngine:
                 full_refresh=full_refresh,
                 **progress,
             )
+
+        # 强制 Tushare
+        if source == "tushare":
+            _emit("Tushare 全量回填", processed=0, success=0, skipped=0, failed=0, rows_written=0)
+            result = self._ts_backfill_all(
+                symbols,
+                effective_start_date,
+                today_str,
+                full_refresh,
+                total,
+                _emit,
+            )
+            return result or {
+                "symbol_count": total,
+                "success": 0,
+                "skipped": 0,
+                "failed": total,
+                "rows_written": 0,
+                "start_date": effective_start_date,
+                "end_date": today_str,
+                "full_refresh": full_refresh,
+            }
+
+        import baostock as bs
+
+        max_retries = 3
+        reconnect_interval = 100
+        code_by_symbol = self._get_baostock_code_map()
 
         def _login():
             lg = bs.login()
@@ -262,8 +458,20 @@ class DataEngine:
         )
 
         if not _login():
+            # Baostock 登录失败，尝试用 Tushare 全量接管
+            logger.warning("Baostock 登录失败，尝试 Tushare 接管回填")
+            result = self._ts_backfill_all(
+                symbols,
+                effective_start_date,
+                today_str,
+                full_refresh,
+                total,
+                _emit,
+            )
+            if result is not None:
+                return result
             _emit(
-                "baostock 登录失败，更新终止",
+                "baostock 登录失败，Tushare 亦不可用，更新终止",
                 processed=0,
                 success=0,
                 skipped=0,
@@ -281,6 +489,28 @@ class DataEngine:
                 "full_refresh": full_refresh,
             }
 
+        # 预过滤：一条 SQL 找出真正需要更新的股票，避免逐只检查 5000+ 只
+        if full_refresh:
+            working_symbols = list(symbols)
+            last_date_map: dict[str, str | None] = {}
+            skipped_before = 0
+        else:
+            working_symbols, last_date_map = self._get_stale_symbols(symbols, today_str)
+            skipped_before = total - len(working_symbols)
+            if skipped_before > 0:
+                logger.info(
+                    f"预过滤：{skipped_before} 只已是最新，{len(working_symbols)} 只需要更新"
+                )
+                _emit(
+                    f"预过滤完成，{len(working_symbols)} 只需要更新",
+                    processed=skipped_before,
+                    success=0,
+                    skipped=skipped_before,
+                    failed=0,
+                    rows_written=0,
+                )
+
+        total = len(working_symbols)
         success = 0
         skipped = 0
         failed = 0
@@ -288,28 +518,9 @@ class DataEngine:
         since_reconnect = 0
 
         try:
-            for i, symbol in enumerate(symbols):
-                processed = i
-                last_date = self._get_last_date(symbol)
-                if not full_refresh and last_date and last_date >= today_str:
-                    skipped += 1
-                    _emit(
-                        f"已跳过 {symbol}，本地已是最新",
-                        processed=processed + 1,
-                        success=success,
-                        skipped=skipped,
-                        failed=failed,
-                        rows_written=rows_written,
-                        current_symbol=symbol,
-                        current_action="已是最新，跳过",
-                    )
-                    if (i + 1) % 500 == 0:
-                        logger.info(
-                            f"已处理 {i + 1}/{total}，"
-                            f"成功 {success} 跳过 {skipped} 失败 {failed}"
-                        )
-                    time.sleep(0.3)
-                    continue
+            for i, symbol in enumerate(working_symbols):
+                processed = skipped_before + i
+                last_date = last_date_map.get(symbol) if not full_refresh else None
                 if full_refresh or not last_date:
                     start = effective_start_date
                 else:
@@ -413,6 +624,35 @@ class DataEngine:
                             logger.warning(f"[{symbol}] {max_retries}次重试均失败，跳过")
 
                 if not query_ok:
+                    # Baostock 全部重试失败，尝试 Tushare 容灾（source=baostock 时跳过）
+                    if source != "baostock":
+                        df_ts = self._ts_fetch_history(symbol, start, today_str)
+                    else:
+                        df_ts = None
+                    if df_ts is not None and not df_ts.empty:
+                        logger.info(f"[{symbol}] Baostock 失败，Tushare 容灾成功")
+                        self._write_ohlcv_df(df_ts)
+                        success += 1
+                        rows_written += len(df_ts)
+                        _emit(
+                            f"已写入 {symbol}：{len(df_ts)} 行 (Tushare)",
+                            processed=processed + 1,
+                            success=success,
+                            skipped=skipped,
+                            failed=failed,
+                            rows_written=rows_written,
+                            current_symbol=symbol,
+                            current_start_date=start,
+                            current_action="Tushare 容灾写入完成",
+                            current_rows=len(df_ts),
+                        )
+                        if (i + 1) % 500 == 0:
+                            logger.info(
+                                f"已处理 {i + 1}/{total}，"
+                                f"成功 {success} 跳过 {skipped} 失败 {failed}"
+                            )
+                        time.sleep(0.3)
+                        continue
                     failed += 1
                     _emit(
                         f"{symbol} 更新失败，继续下一只",
@@ -507,20 +747,24 @@ class DataEngine:
         finally:
             bs.logout()
 
-        logger.info(f"回填完成 — 成功: {success} | 跳过: {skipped} | 失败: {failed}")
+        total_skipped = skipped_before + skipped
+        total_processed = total + skipped_before
+        logger.info(
+            f"回填完成 — 成功: {success} | 跳过: {total_skipped} | 失败: {failed}"
+        )
         _emit(
             "历史 K 线更新完成",
-            processed=total,
+            processed=total_processed,
             success=success,
-            skipped=skipped,
+            skipped=total_skipped,
             failed=failed,
             rows_written=rows_written,
             current_action="完成",
         )
         return {
-            "symbol_count": total,
+            "symbol_count": total_processed,
             "success": success,
-            "skipped": skipped,
+            "skipped": total_skipped,
             "failed": failed,
             "rows_written": rows_written,
             "start_date": effective_start_date,
@@ -536,13 +780,183 @@ class DataEngine:
         return [record["symbol"] for record in records]
 
     def sync_stock_basic(self) -> list[dict[str, str]]:
-        """同步全市场 A 股基础信息，返回本次获取到的股票记录。"""
-        import baostock as bs
+        """同步全市场 A 股基础信息，Tushare 优先，Baostock 容灾。"""
+        records = self._ts_fetch_stock_list()
+        if records:
+            self._write_stock_basic(records)
+            return records
+
+        logger.info("Tushare 不可用，回退到 Baostock 获取股票列表")
+        records = self._bs_fetch_stock_list()
+        if records:
+            self._write_stock_basic(records)
+        return records
+
+    def _ts_backfill_all(
+        self,
+        symbols: list[str],
+        start_date: str,
+        end_date: str,
+        full_refresh: bool,
+        total: int,
+        emit,
+    ) -> dict | None:
+        """Tushare 全量接管回填（当 Baostock 完全不可用时）。"""
+        import time
+
+        pro = self._get_ts_pro()
+        if pro is None:
+            return None
+
+        # 预过滤
+        if full_refresh:
+            working_symbols = list(symbols)
+            last_date_map: dict[str, str | None] = {}
+            skipped_before = 0
+        else:
+            working_symbols, last_date_map = self._get_stale_symbols(symbols, end_date)
+            skipped_before = total - len(working_symbols)
+            if skipped_before > 0:
+                logger.info(
+                    f"Tushare 预过滤：{skipped_before} 只已是最新，{len(working_symbols)} 只需要更新"
+                )
+
+        total = len(working_symbols)
+        success = 0
+        skipped = 0
+        failed = 0
+        rows_written = 0
+        ts_calls = 0
+        max_ts_calls = 450  # 留余量
+
+        for i, symbol in enumerate(working_symbols):
+            if ts_calls >= max_ts_calls:
+                logger.warning("Tushare 当日调用次数已达上限，停止回填")
+                break
+
+            processed = skipped_before + i
+            last_date = last_date_map.get(symbol) if not full_refresh else None
+            if full_refresh or not last_date:
+                start = start_date
+            else:
+                start = last_date
+                if start < start_date:
+                    start = start_date
+
+            if start > end_date:
+                skipped += 1
+                continue
+
+            emit(
+                f"Tushare 正在更新 {symbol}（{processed + 1}/{total}）",
+                processed=processed,
+                success=success,
+                skipped=skipped,
+                failed=failed,
+                rows_written=rows_written,
+                current_symbol=symbol,
+                current_start_date=start,
+                current_action="Tushare 请求历史 K 线",
+            )
+
+            df = self._ts_fetch_history(symbol, start, end_date)
+            ts_calls += 1
+
+            if df is not None and not df.empty:
+                self._write_ohlcv_df(df)
+                success += 1
+                rows_written += len(df)
+                emit(
+                    f"Tushare 已写入 {symbol}：{len(df)} 行",
+                    processed=processed + 1,
+                    success=success,
+                    skipped=skipped,
+                    failed=failed,
+                    rows_written=rows_written,
+                    current_symbol=symbol,
+                    current_action="Tushare 写入完成",
+                    current_rows=len(df),
+                )
+            else:
+                failed += 1
+
+            time.sleep(0.3)
+
+        total_skipped = skipped_before + skipped
+        logger.info(
+            f"Tushare 回填完成 — 成功: {success} | 跳过: {total_skipped} | 失败: {failed}"
+        )
+        emit(
+            "Tushare 历史 K 线更新完成",
+            processed=total + skipped_before,
+            success=success,
+            skipped=total_skipped,
+            failed=failed,
+            rows_written=rows_written,
+            current_action="完成",
+        )
+        return {
+            "symbol_count": total + skipped_before,
+            "success": success,
+            "skipped": total_skipped,
+            "failed": failed,
+            "rows_written": rows_written,
+            "start_date": start_date,
+            "end_date": end_date,
+            "full_refresh": full_refresh,
+        }
+
+    def _write_ohlcv_df(self, df: "pd.DataFrame") -> None:
+        """将 OHLCV DataFrame 写入 SQLite。"""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO stock_daily
+                    (symbol, date, open, high, low, close, volume, turnover)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                df.itertuples(index=False, name=None),
+            )
+            conn.commit()
+
+    def _write_stock_basic(self, records: list[dict[str, str]]) -> None:
         from datetime import datetime
+
+        updated_at = datetime.now().isoformat(timespec="seconds")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                """
+                INSERT INTO stock_basic
+                    (symbol, code, name, status, stock_type, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    code = excluded.code,
+                    name = excluded.name,
+                    status = excluded.status,
+                    stock_type = excluded.stock_type,
+                    updated_at = excluded.updated_at
+                """,
+                [
+                    (
+                        record["symbol"],
+                        record["code"],
+                        record["name"],
+                        record.get("status", "1"),
+                        record.get("stock_type", "1"),
+                        updated_at,
+                    )
+                    for record in records
+                ],
+            )
+            conn.commit()
+
+    def _bs_fetch_stock_list(self) -> list[dict[str, str]]:
+        """Baostock 获取全市场 A 股列表。"""
+        import baostock as bs
 
         lg = bs.login()
         if lg.error_code != "0":
-            logger.error(f"baostock 登录失败: {lg.error_msg}")
+            logger.error(f"Baostock 登录失败: {lg.error_msg}")
             return []
 
         try:
@@ -574,38 +988,10 @@ class DataEngine:
                     }
                 )
 
-            updated_at = datetime.now().isoformat(timespec="seconds")
-            with sqlite3.connect(self.db_path) as conn:
-                conn.executemany(
-                    """
-                    INSERT INTO stock_basic
-                        (symbol, code, name, status, stock_type, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(symbol) DO UPDATE SET
-                        code = excluded.code,
-                        name = excluded.name,
-                        status = excluded.status,
-                        stock_type = excluded.stock_type,
-                        updated_at = excluded.updated_at
-                    """,
-                    [
-                        (
-                            record["symbol"],
-                            record["code"],
-                            record["name"],
-                            record["status"],
-                            record["stock_type"],
-                            updated_at,
-                        )
-                        for record in records
-                    ],
-                )
-                conn.commit()
-
-            logger.info(f"获取股票列表完成，共 {len(records)} 只")
+            logger.info(f"Baostock 获取股票列表完成，共 {len(records)} 只")
             return records
         except Exception as e:
-            logger.error(f"获取股票列表失败: {e}")
+            logger.error(f"Baostock 获取股票列表失败: {e}")
             return []
         finally:
             bs.logout()

@@ -5,6 +5,7 @@ requires-python = ">=3.10"
 dependencies = [
     "akshare>=1.10",
     "baostock>=0.9",
+    "tushare>=1.4",
     "pydantic-settings>=2.0",
     "python-dotenv>=1.0",
     "rich>=13.0",
