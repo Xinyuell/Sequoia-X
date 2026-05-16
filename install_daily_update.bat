@@ -1,4 +1,4 @@
-﻿@echo off
-chcp 65001 >nul
-call "%~dp0start_webui.bat" install-schedule
+@echo off
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\webui_menu.ps1" install-schedule
 pause
+

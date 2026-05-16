@@ -1,3 +1,3 @@
-﻿@echo off
-chcp 65001 >nul
+@echo off
 call "%~dp0start_webui.bat"
+

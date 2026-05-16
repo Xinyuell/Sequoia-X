@@ -52,7 +52,8 @@ def test_sideways_consolidation_selects_matching_stock(tmp_path) -> None:
         settings=settings,
         lookback_days=20,
         max_amplitude_pct=12.0,
-        near_high_pct=3.0,
+        min_distance_pct=0.0,
+        max_distance_pct=3.0,
     )
 
     rows = strategy.run_with_details()
@@ -75,7 +76,8 @@ def test_sideways_consolidation_skips_insufficient_and_invalid_data(tmp_path) ->
         settings=settings,
         lookback_days=20,
         max_amplitude_pct=12.0,
-        near_high_pct=3.0,
+        min_distance_pct=0.0,
+        max_distance_pct=3.0,
     )
 
     assert strategy.run_with_details() == []

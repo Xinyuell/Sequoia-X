@@ -85,7 +85,8 @@ def test_api_runs_sideways_strategy_with_parameters(tmp_path) -> None:
             "parameters": {
                 "lookback_days": 20,
                 "max_amplitude_pct": 12,
-                "near_high_pct": 3,
+                "min_distance_pct": 0,
+                "max_distance_pct": 3,
             }
         },
     )

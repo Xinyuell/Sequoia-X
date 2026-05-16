@@ -40,7 +40,8 @@ def test_sideways_parameters_accept_defaults_and_numeric_strings(tmp_path) -> No
     assert parameters == {
         "lookback_days": 30,
         "max_amplitude_pct": 9.5,
-        "near_high_pct": 3.0,
+        "min_distance_pct": 0.0,
+        "max_distance_pct": 3.0,
     }
 
 
