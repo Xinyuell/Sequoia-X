@@ -155,7 +155,12 @@ class DataEngine:
         logger.info(f"sync_today_bulk: 写入 {count} 条数据")
         return count
 
-    def backfill(self, symbols: list[str]) -> None:
+    def backfill(
+        self,
+        symbols: list[str],
+        start_date: str | None = None,
+        full_refresh: bool = False,
+    ) -> dict[str, int | str | bool]:
         """通过 baostock 批量回填历史日 K 线数据（后复权）。
 
         容错机制：
@@ -169,6 +174,8 @@ class DataEngine:
         import baostock as bs
 
         today_str = date.today().strftime("%Y-%m-%d")
+        effective_start_date = start_date or self.start_date
+        date.fromisoformat(effective_start_date)
         max_retries = 3
         reconnect_interval = 200  # 每处理 N 只股票重连一次
 
@@ -180,17 +187,27 @@ class DataEngine:
             return True
 
         if not _login():
-            return
+            return {
+                "symbol_count": len(symbols),
+                "success": 0,
+                "skipped": 0,
+                "failed": len(symbols),
+                "rows_written": 0,
+                "start_date": effective_start_date,
+                "end_date": today_str,
+                "full_refresh": full_refresh,
+            }
 
         success = 0
         skipped = 0
         failed = 0
+        rows_written = 0
         since_reconnect = 0
 
         try:
             for i, symbol in enumerate(symbols):
                 last_date = self._get_last_date(symbol)
-                if last_date and last_date >= today_str:
+                if not full_refresh and last_date and last_date >= today_str:
                     skipped += 1
                     if (i + 1) % 500 == 0:
                         logger.info(
@@ -200,18 +217,34 @@ class DataEngine:
                     continue
 
                 # 定期重连，防止长连接超时
+                if full_refresh or not last_date:
+                    start = effective_start_date
+                else:
+                    start = (date.fromisoformat(last_date) + timedelta(days=1)).strftime("%Y-%m-%d")
+                    if start < effective_start_date:
+                        start = effective_start_date
+
+                if start > today_str:
+                    skipped += 1
+                    continue
+
                 since_reconnect += 1
                 if since_reconnect >= reconnect_interval:
                     bs.logout()
                     time.sleep(1)
                     if not _login():
                         logger.error("重连失败，终止回填")
-                        return
+                        return {
+                            "symbol_count": len(symbols),
+                            "success": success,
+                            "skipped": skipped,
+                            "failed": failed + len(symbols) - i,
+                            "rows_written": rows_written,
+                            "start_date": effective_start_date,
+                            "end_date": today_str,
+                            "full_refresh": full_refresh,
+                        }
                     since_reconnect = 0
-
-                start = last_date or self.start_date
-                if last_date:
-                    start = (date.fromisoformat(last_date) + timedelta(days=1)).strftime("%Y-%m-%d")
 
                 bs_code = self._to_baostock_code(symbol)
 
@@ -274,16 +307,19 @@ class DataEngine:
                 df = df.rename(columns={"amount": "turnover"})
                 df = df[["symbol", "date", "open", "high", "low", "close", "volume", "turnover"]]
 
-                try:
-                    with sqlite3.connect(self.db_path) as conn:
-                        df.to_sql(
-                            "stock_daily", conn, if_exists="append",
-                            index=False, method="multi", chunksize=500,
-                        )
-                except sqlite3.IntegrityError:
-                    pass
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.executemany(
+                        """
+                        INSERT OR REPLACE INTO stock_daily
+                            (symbol, date, open, high, low, close, volume, turnover)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        df.itertuples(index=False, name=None),
+                    )
+                    conn.commit()
 
                 success += 1
+                rows_written += len(df)
 
                 if (i + 1) % 500 == 0:
                     logger.info(
@@ -297,6 +333,17 @@ class DataEngine:
         logger.info(f"回填完成 — 成功: {success} | 跳过: {skipped} | 失败: {failed}")
 
     # ── 股票列表 ──
+
+        return {
+            "symbol_count": len(symbols),
+            "success": success,
+            "skipped": skipped,
+            "failed": failed,
+            "rows_written": rows_written,
+            "start_date": effective_start_date,
+            "end_date": today_str,
+            "full_refresh": full_refresh,
+        }
 
     def get_all_symbols(self) -> list[str]:
         """通过 baostock 获取全市场 A 股代码列表。"""
