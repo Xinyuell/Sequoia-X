@@ -48,6 +48,42 @@ CREATE INDEX IF NOT EXISTS idx_stock_basic_name ON stock_basic (name);
 """
 
 
+def _query_bs_with_timeout(bs, bs_code: str, start: str, end: str, timeout: int = 30):
+    """在独立线程中执行 baostock 查询，超时抛出 TimeoutError。"""
+    import threading
+
+    result = [None, None]
+
+    def _query():
+        try:
+            rs = bs.query_history_k_data_plus(
+                bs_code,
+                "date,open,high,low,close,volume,amount",
+                start_date=start,
+                end_date=end,
+                frequency="d",
+                adjustflag="1",
+            )
+            if rs.error_code != "0":
+                result[0] = RuntimeError(rs.error_msg)
+                return
+            rows = []
+            while rs.next():
+                rows.append(rs.get_row_data())
+            result[1] = rows
+        except Exception as exc:
+            result[0] = exc
+
+    thread = threading.Thread(target=_query, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+    if thread.is_alive():
+        raise TimeoutError(f"baostock 查询超时 ({timeout}s): {bs_code} {start}~{end}")
+    if result[0] is not None:
+        raise result[0]
+    return result[1]
+
+
 def _bs_fetch_batch(tasks: list) -> list:
     """多进程 worker：独立 login，批量拉取 baostock 数据。"""
     import time
@@ -61,20 +97,13 @@ def _bs_fetch_batch(tasks: list) -> list:
             time.sleep(0.5)
         for attempt in range(3):
             try:
-                rs = bs.query_history_k_data_plus(
-                    bs_code,
-                    "date,open,high,low,close,volume,amount",
-                    start_date=start,
-                    end_date=end,
-                    frequency="d",
-                    adjustflag="1",  # 后复权
-                )
-                if rs.error_code != "0":
-                    time.sleep(2 ** attempt)
-                    continue
-                while rs.next():
-                    results.append([symbol] + rs.get_row_data())
+                rows = _query_bs_with_timeout(bs, bs_code, start, end, timeout=45)
+                for row in rows:
+                    results.append([symbol] + row)
                 break
+            except TimeoutError:
+                time.sleep(2)
+                continue
             except Exception:
                 time.sleep(2 ** attempt)
     bs.logout()
@@ -586,29 +615,28 @@ class DataEngine:
                     current_action="请求历史 K 线",
                 )
 
-                # 带重试的查询
+                # 带重试和超时的查询
                 rows = []
                 query_ok = False
                 for attempt in range(max_retries):
                     try:
-                        rs = bs.query_history_k_data_plus(
-                            bs_code,
-                            "date,open,high,low,close,volume,amount",
-                            start_date=start,
-                            end_date=today_str,
-                            frequency="d",
-                            adjustflag="1",  # 后复权
+                        rows = _query_bs_with_timeout(
+                            bs, bs_code, start, today_str, timeout=45
                         )
-
-                        if rs.error_code != "0":
-                            raise RuntimeError(rs.error_msg)
-
-                        rows = []
-                        while rs.next():
-                            rows.append(rs.get_row_data())
                         query_ok = True
                         break
-
+                    except TimeoutError:
+                        if attempt < max_retries - 1:
+                            wait = 2 ** (attempt + 1)
+                            logger.warning(
+                                f"[{symbol}] 第{attempt + 1}次超时，{wait}s 后重试"
+                            )
+                            time.sleep(wait)
+                            bs.logout()
+                            time.sleep(1)
+                            _login()
+                        else:
+                            logger.warning(f"[{symbol}] {max_retries}次均超时，跳过")
                     except Exception as exc:
                         if attempt < max_retries - 1:
                             wait = 2 ** (attempt + 1)
@@ -616,7 +644,6 @@ class DataEngine:
                                 f"[{symbol}] 第{attempt + 1}次失败: {exc}，{wait}s 后重试"
                             )
                             time.sleep(wait)
-                            # 重连 baostock
                             bs.logout()
                             time.sleep(1)
                             _login()
