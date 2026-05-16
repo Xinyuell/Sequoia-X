@@ -19,16 +19,15 @@ class BaseStrategy(ABC):
 
     webhook_key: str = "default"
 
-    def __init__(self, engine: DataEngine, settings: Settings) -> None:
-        """
-        初始化策略。
-
-        Args:
-            engine: DataEngine 实例，用于读取行情数据。
-            settings: Settings 实例，用于读取配置。
-        """
+    def __init__(
+        self,
+        engine: DataEngine,
+        settings: Settings,
+        reference_date: str | None = None,
+    ) -> None:
         self.engine = engine
         self.settings = settings
+        self.reference_date = reference_date
 
     @abstractmethod
     def run(self) -> list[str]:

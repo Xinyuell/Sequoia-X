@@ -69,6 +69,7 @@ function bindActions() {
 }
 
 async function loadInitialData() {
+  byId("referenceDate").value = new Date().toISOString().slice(0, 10);
   await Promise.all([loadDataSummary(), loadStrategies(), loadStocks()]);
 }
 
@@ -524,9 +525,14 @@ async function runSelectedStrategy() {
 
   try {
     const parameters = collectParameters();
+    const referenceDate = byId("referenceDate").value || null;
+    const body = { parameters };
+    if (referenceDate) {
+      body.reference_date = referenceDate;
+    }
     const result = await api(`/api/strategies/${encodeURIComponent(state.selectedStrategy.key)}/run`, {
       method: "POST",
-      body: JSON.stringify({ parameters }),
+      body: JSON.stringify(body),
     });
     state.result = result;
     renderResults(result);

@@ -18,7 +18,7 @@ from sequoia_x.strategy.turtle_trade import TurtleTradeStrategy
 from sequoia_x.strategy.uptrend_limit_down import UptrendLimitDownStrategy
 
 ParameterType = Literal["integer", "number", "boolean", "choice"]
-StrategyFactory = Callable[[DataEngine, Settings, dict[str, Any]], BaseStrategy]
+StrategyFactory = Callable[[DataEngine, Settings, dict[str, Any], str | None], BaseStrategy]
 
 
 class ParameterValidationError(ValueError):
@@ -160,14 +160,20 @@ class StrategyDefinition:
         engine: DataEngine,
         settings: Settings,
         raw_parameters: dict[str, Any] | None = None,
+        reference_date: str | None = None,
     ) -> tuple[BaseStrategy, dict[str, Any]]:
         parameters = self.validate_parameters(raw_parameters)
-        return self.factory(engine, settings, parameters), parameters
+        return self.factory(engine, settings, parameters, reference_date), parameters
 
 
 def _class_factory(strategy_class: type[BaseStrategy]) -> StrategyFactory:
-    def create(engine: DataEngine, settings: Settings, parameters: dict[str, Any]) -> BaseStrategy:
-        return strategy_class(engine=engine, settings=settings)
+    def create(
+        engine: DataEngine,
+        settings: Settings,
+        parameters: dict[str, Any],
+        reference_date: str | None,
+    ) -> BaseStrategy:
+        return strategy_class(engine=engine, settings=settings, reference_date=reference_date)
 
     return create
 
@@ -176,8 +182,14 @@ def _sideways_factory(
     engine: DataEngine,
     settings: Settings,
     parameters: dict[str, Any],
+    reference_date: str | None,
 ) -> SidewaysConsolidationStrategy:
-    return SidewaysConsolidationStrategy(engine=engine, settings=settings, **parameters)
+    return SidewaysConsolidationStrategy(
+        engine=engine,
+        settings=settings,
+        reference_date=reference_date,
+        **parameters,
+    )
 
 
 BUILTIN_STRATEGIES: tuple[StrategyDefinition, ...] = (

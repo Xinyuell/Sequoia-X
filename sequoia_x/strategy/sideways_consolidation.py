@@ -57,7 +57,7 @@ class SidewaysConsolidationStrategy(BaseStrategy):
         return rows
 
     def _evaluate_symbol(self, symbol: str) -> StrategyResultRow | None:
-        df = self.engine.get_ohlcv(symbol)
+        df = self.engine.get_ohlcv(symbol, end_date=self.reference_date)
         if df is None or len(df) < self.lookback_days:
             return None
 

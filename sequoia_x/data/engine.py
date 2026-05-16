@@ -50,22 +50,33 @@ CREATE INDEX IF NOT EXISTS idx_stock_basic_name ON stock_basic (name);
 
 def _bs_fetch_batch(tasks: list) -> list:
     """多进程 worker：独立 login，批量拉取 baostock 数据。"""
+    import time
+
     import baostock as bs
+
     bs.login()
     results = []
-    for symbol, bs_code, start, end in tasks:
-        rs = bs.query_history_k_data_plus(
-            bs_code,
-            "date,open,high,low,close,volume,amount",
-            start_date=start,
-            end_date=end,
-            frequency="d",
-            adjustflag="1",  # 后复权
-        )
-        if rs.error_code != "0":
-            continue
-        while rs.next():
-            results.append([symbol] + rs.get_row_data())
+    for idx, (symbol, bs_code, start, end) in enumerate(tasks):
+        if idx > 0:
+            time.sleep(0.5)
+        for attempt in range(3):
+            try:
+                rs = bs.query_history_k_data_plus(
+                    bs_code,
+                    "date,open,high,low,close,volume,amount",
+                    start_date=start,
+                    end_date=end,
+                    frequency="d",
+                    adjustflag="1",  # 后复权
+                )
+                if rs.error_code != "0":
+                    time.sleep(2 ** attempt)
+                    continue
+                while rs.next():
+                    results.append([symbol] + rs.get_row_data())
+                break
+            except Exception:
+                time.sleep(2 ** attempt)
     bs.logout()
     return results
 
@@ -96,13 +107,20 @@ class DataEngine:
             ).fetchone()
         return row[0] if row and row[0] else None
 
-    def get_ohlcv(self, symbol: str) -> pd.DataFrame:
+    def get_ohlcv(self, symbol: str, end_date: str | None = None) -> pd.DataFrame:
         with sqlite3.connect(self.db_path) as conn:
-            df = pd.read_sql(
-                "SELECT * FROM stock_daily WHERE symbol = ? ORDER BY date",
-                conn,
-                params=(symbol,),
-            )
+            if end_date:
+                df = pd.read_sql(
+                    "SELECT * FROM stock_daily WHERE symbol = ? AND date <= ? ORDER BY date",
+                    conn,
+                    params=(symbol, end_date),
+                )
+            else:
+                df = pd.read_sql(
+                    "SELECT * FROM stock_daily WHERE symbol = ? ORDER BY date",
+                    conn,
+                    params=(symbol,),
+                )
         return df
 
     @staticmethod
@@ -211,7 +229,7 @@ class DataEngine:
         effective_start_date = start_date or self.start_date
         date.fromisoformat(effective_start_date)
         max_retries = 3
-        reconnect_interval = 200  # 每处理 N 只股票重连一次
+        reconnect_interval = 100  # 每处理 N 只股票重连一次
         total = len(symbols)
         code_by_symbol = self._get_baostock_code_map()
 
@@ -290,9 +308,8 @@ class DataEngine:
                             f"已处理 {i + 1}/{total}，"
                             f"成功 {success} 跳过 {skipped} 失败 {failed}"
                         )
+                    time.sleep(0.3)
                     continue
-
-                # 定期重连，防止长连接超时
                 if full_refresh or not last_date:
                     start = effective_start_date
                 else:
@@ -313,6 +330,7 @@ class DataEngine:
                         current_start_date=start,
                         current_action="无需更新，跳过",
                     )
+                    time.sleep(0.3)
                     continue
 
                 since_reconnect += 1
@@ -407,6 +425,7 @@ class DataEngine:
                         current_start_date=start,
                         current_action="查询失败",
                     )
+                    time.sleep(1.0)
                     continue
 
                 if not rows:
@@ -422,6 +441,7 @@ class DataEngine:
                         current_start_date=start,
                         current_action="无数据，跳过",
                     )
+                    time.sleep(0.3)
                     continue
 
                 df = pd.DataFrame(rows, columns=rs.fields)
@@ -443,6 +463,7 @@ class DataEngine:
                         current_start_date=start,
                         current_action="无有效数据，跳过",
                     )
+                    time.sleep(0.3)
                     continue
 
                 df["symbol"] = symbol
@@ -480,6 +501,8 @@ class DataEngine:
                         f"已处理 {i + 1}/{total}，"
                         f"成功 {success} 跳过 {skipped} 失败 {failed}"
                     )
+
+                time.sleep(0.3)
 
         finally:
             bs.logout()

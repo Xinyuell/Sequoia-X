@@ -21,6 +21,7 @@ from sequoia_x.web.jobs import InMemoryJobManager, JobAlreadyRunningError, JobNo
 
 class StrategyRunRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
+    reference_date: date | None = None
 
 
 class BackfillRequest(BaseModel):
@@ -146,6 +147,7 @@ def create_api_router() -> APIRouter:
                 engine=_engine(request),
                 settings=request.app.state.settings,
                 raw_parameters=payload.parameters,
+                reference_date=payload.reference_date.isoformat() if payload.reference_date else None,
             )
         except ParameterValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
