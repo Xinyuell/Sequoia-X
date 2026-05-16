@@ -263,6 +263,76 @@ h1 {
   display: flex;
 }
 
+.stock-browser {
+  display: grid;
+  grid-template-columns: minmax(440px, 0.9fr) minmax(360px, 1.1fr);
+  gap: 14px;
+  align-items: start;
+  margin-top: 16px;
+}
+
+.stock-list-head,
+.chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.stock-list-head .panel-title,
+.chart-head .panel-title {
+  margin-bottom: 0;
+}
+
+.stock-list-head input {
+  max-width: 220px;
+}
+
+.stock-table-wrap {
+  max-height: 430px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.stock-table {
+  min-width: 560px;
+  box-shadow: none;
+}
+
+.stock-table tbody tr {
+  cursor: pointer;
+}
+
+.stock-table tbody tr:hover,
+.stock-table tbody tr.selected {
+  background: #eaf3f1;
+}
+
+.stock-table td,
+.stock-table th {
+  padding: 10px 12px;
+}
+
+.chart-panel {
+  min-width: 0;
+}
+
+#chartMeta {
+  min-height: 20px;
+  font-size: 13px;
+}
+
+#stockChart {
+  display: block;
+  width: 100%;
+  height: 420px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
 .strategy-layout {
   display: grid;
   grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
@@ -444,7 +514,8 @@ tbody tr:last-child td {
   .metric-grid,
   .parameter-grid,
   .strategy-layout,
-  .data-update-panel {
+  .data-update-panel,
+  .stock-browser {
     grid-template-columns: 1fr 1fr;
   }
 }
@@ -468,8 +539,21 @@ tbody tr:last-child td {
   .parameter-grid,
   .strategy-layout,
   .data-update-panel,
+  .stock-browser,
   .job-panel {
     grid-template-columns: 1fr;
+  }
+
+  .stock-list-head,
+  .chart-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .stock-list-head input,
+  #reloadStocksBtn {
+    max-width: none;
+    width: 100%;
   }
 
   .button-row,

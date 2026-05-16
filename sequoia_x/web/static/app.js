@@ -3,6 +3,9 @@ const state = {
   selectedStrategy: null,
   result: null,
   pollTimer: null,
+  stockSearchTimer: null,
+  stocks: [],
+  selectedSymbol: null,
 };
 
 const numberFormatter = new Intl.NumberFormat("zh-CN");
@@ -27,6 +30,11 @@ function bindActions() {
   byId("refreshDataBtn").addEventListener("click", loadDataSummary);
   byId("syncBtn").addEventListener("click", () => startDataJob("/api/data/sync"));
   byId("backfillBtn").addEventListener("click", startBackfillJob);
+  byId("reloadStocksBtn").addEventListener("click", () => loadStocks());
+  byId("stockSearch").addEventListener("input", () => {
+    clearTimeout(state.stockSearchTimer);
+    state.stockSearchTimer = setTimeout(() => loadStocks(), 240);
+  });
   byId("strategySelect").addEventListener("change", (event) => {
     selectStrategy(event.target.value);
   });
@@ -34,7 +42,7 @@ function bindActions() {
 }
 
 async function loadInitialData() {
-  await Promise.all([loadDataSummary(), loadStrategies()]);
+  await Promise.all([loadDataSummary(), loadStrategies(), loadStocks()]);
 }
 
 function startBackfillJob() {
@@ -133,10 +141,191 @@ async function pollJob(jobId) {
     }
     setDataButtonsDisabled(false);
     await loadDataSummary();
+    await loadStocks();
   } catch (error) {
     renderJobError(error.message);
     setDataButtonsDisabled(false);
   }
+}
+
+async function loadStocks() {
+  const query = byId("stockSearch").value.trim();
+  const path = query
+    ? `/api/stocks?limit=80&query=${encodeURIComponent(query)}`
+    : "/api/stocks?limit=80";
+  try {
+    state.stocks = await api(path);
+    renderStockRows(state.stocks);
+    if (state.stocks.length === 0) {
+      state.selectedSymbol = null;
+      renderEmptyChart("暂无本地股票数据");
+      return;
+    }
+    const selectedStillVisible = state.stocks.some((stock) => stock.symbol === state.selectedSymbol);
+    const nextSymbol = selectedStillVisible ? state.selectedSymbol : state.stocks[0].symbol;
+    selectStock(nextSymbol);
+  } catch (error) {
+    byId("stockRows").innerHTML = `
+      <tr>
+        <td colspan="5" class="muted">股票读取失败：${escapeHtml(error.message)}</td>
+      </tr>
+    `;
+    renderEmptyChart("股票读取失败");
+  }
+}
+
+function renderStockRows(stocks) {
+  const body = byId("stockRows");
+  if (stocks.length === 0) {
+    body.innerHTML = `
+      <tr>
+        <td colspan="5" class="muted">暂无本地股票数据</td>
+      </tr>
+    `;
+    return;
+  }
+  body.innerHTML = stocks
+    .map(
+      (stock) => `
+        <tr data-symbol="${escapeHtml(stock.symbol)}" class="${stock.symbol === state.selectedSymbol ? "selected" : ""}">
+          <td>${escapeHtml(stock.name || stock.symbol)}</td>
+          <td>${escapeHtml(stock.symbol)}</td>
+          <td>${escapeHtml(stock.latest_date || "--")}</td>
+          <td>${escapeHtml(formatMaybeNumber(stock.close))}</td>
+          <td>${escapeHtml(formatNumber(stock.row_count || 0))}</td>
+        </tr>
+      `,
+    )
+    .join("");
+  body.querySelectorAll("tr[data-symbol]").forEach((row) => {
+    row.addEventListener("click", () => selectStock(row.dataset.symbol));
+  });
+}
+
+async function selectStock(symbol) {
+  if (!symbol) {
+    return;
+  }
+  state.selectedSymbol = symbol;
+  renderStockRows(state.stocks);
+  const stock = state.stocks.find((item) => item.symbol === symbol);
+  byId("chartTitle").textContent = `${stock?.name || symbol} ${symbol}`;
+  byId("chartMeta").textContent = "K 线加载中";
+
+  try {
+    const payload = await api(`/api/stocks/${encodeURIComponent(symbol)}/ohlcv?limit=120`);
+    renderKlineChart(payload.rows || [], stock);
+  } catch (error) {
+    renderEmptyChart(error.message);
+  }
+}
+
+function renderEmptyChart(message) {
+  byId("chartTitle").textContent = "K 线";
+  byId("chartMeta").textContent = message;
+  const canvas = byId("stockChart");
+  const ctx = setupCanvas(canvas);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#65717d";
+  ctx.font = "14px sans-serif";
+  ctx.fillText(message, 24, 42);
+}
+
+function renderKlineChart(rows, stock) {
+  const canvas = byId("stockChart");
+  const ctx = setupCanvas(canvas);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (!rows.length) {
+    renderEmptyChart("暂无 K 线数据");
+    return;
+  }
+
+  const padding = { left: 52, right: 18, top: 20, bottom: 54 };
+  const volumeHeight = 72;
+  const chartHeight = canvas.height - padding.top - padding.bottom - volumeHeight - 18;
+  const chartWidth = canvas.width - padding.left - padding.right;
+  const priceValues = rows.flatMap((row) => [Number(row.high), Number(row.low)]).filter(Number.isFinite);
+  const maxPrice = Math.max(...priceValues);
+  const minPrice = Math.min(...priceValues);
+  const priceRange = maxPrice - minPrice || 1;
+  const maxVolume = Math.max(...rows.map((row) => Number(row.volume)).filter(Number.isFinite), 1);
+  const candleStep = chartWidth / rows.length;
+  const candleWidth = Math.max(3, Math.min(12, candleStep * 0.58));
+  const priceY = (value) => padding.top + (maxPrice - value) / priceRange * chartHeight;
+  const volumeTop = padding.top + chartHeight + 18;
+
+  drawGrid(ctx, padding, chartWidth, chartHeight, minPrice, maxPrice);
+
+  rows.forEach((row, index) => {
+    const open = Number(row.open);
+    const high = Number(row.high);
+    const low = Number(row.low);
+    const close = Number(row.close);
+    const volume = Number(row.volume);
+    if (![open, high, low, close].every(Number.isFinite)) {
+      return;
+    }
+    const x = padding.left + index * candleStep + candleStep / 2;
+    const up = close >= open;
+    ctx.strokeStyle = up ? "#b3261e" : "#126a5e";
+    ctx.fillStyle = up ? "#b3261e" : "#126a5e";
+    ctx.beginPath();
+    ctx.moveTo(x, priceY(high));
+    ctx.lineTo(x, priceY(low));
+    ctx.stroke();
+
+    const bodyTop = priceY(Math.max(open, close));
+    const bodyHeight = Math.max(1, Math.abs(priceY(open) - priceY(close)));
+    ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight);
+
+    if (Number.isFinite(volume)) {
+      const barHeight = volume / maxVolume * volumeHeight;
+      ctx.globalAlpha = 0.32;
+      ctx.fillRect(x - candleWidth / 2, volumeTop + volumeHeight - barHeight, candleWidth, barHeight);
+      ctx.globalAlpha = 1;
+    }
+  });
+
+  ctx.fillStyle = "#65717d";
+  ctx.font = "12px sans-serif";
+  ctx.fillText(rows[0].date, padding.left, canvas.height - 18);
+  ctx.textAlign = "right";
+  ctx.fillText(rows[rows.length - 1].date, canvas.width - padding.right, canvas.height - 18);
+  ctx.textAlign = "left";
+
+  const latest = rows[rows.length - 1];
+  byId("chartMeta").textContent = `${latest.date}  开 ${formatMaybeNumber(latest.open)}  高 ${formatMaybeNumber(latest.high)}  低 ${formatMaybeNumber(latest.low)}  收 ${formatMaybeNumber(latest.close)}  量 ${formatNumber(latest.volume)}`;
+  if (stock) {
+    byId("chartTitle").textContent = `${stock.name || stock.symbol} ${stock.symbol}`;
+  }
+}
+
+function drawGrid(ctx, padding, chartWidth, chartHeight, minPrice, maxPrice) {
+  ctx.strokeStyle = "#e4e8ec";
+  ctx.fillStyle = "#65717d";
+  ctx.font = "12px sans-serif";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i += 1) {
+    const y = padding.top + chartHeight / 4 * i;
+    const price = maxPrice - (maxPrice - minPrice) / 4 * i;
+    ctx.beginPath();
+    ctx.moveTo(padding.left, y);
+    ctx.lineTo(padding.left + chartWidth, y);
+    ctx.stroke();
+    ctx.fillText(price.toFixed(2), 8, y + 4);
+  }
+}
+
+function setupCanvas(canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(320, Math.floor(rect.width));
+  const height = Math.max(260, Math.floor(rect.height));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  return canvas.getContext("2d");
 }
 
 function renderJob(job) {

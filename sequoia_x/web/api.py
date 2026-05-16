@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from sequoia_x.data.engine import DataEngine
@@ -34,6 +34,28 @@ def create_api_router() -> APIRouter:
     @router.get("/data/summary")
     def data_summary(request: Request) -> dict[str, Any]:
         return summarize_market_data(_engine(request))
+
+    @router.get("/stocks")
+    def stocks(
+        request: Request,
+        query: str | None = Query(default=None, max_length=40),
+        limit: int = Query(default=80, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[dict[str, Any]]:
+        return _engine(request).list_local_stocks(query=query, limit=limit, offset=offset)
+
+    @router.get("/stocks/{symbol}/ohlcv")
+    def stock_ohlcv(
+        request: Request,
+        symbol: str,
+        limit: int = Query(default=120, ge=1, le=500),
+    ) -> dict[str, Any]:
+        if not symbol.isdigit() or len(symbol) != 6:
+            raise HTTPException(status_code=422, detail="symbol must be a 6-digit code")
+        rows = _engine(request).get_ohlcv_tail(symbol=symbol, limit=limit)
+        if not rows:
+            raise HTTPException(status_code=404, detail="No local OHLCV data for symbol")
+        return {"symbol": symbol, "rows": rows}
 
     @router.post("/data/backfill")
     def start_backfill(request: Request, payload: BackfillRequest | None = None) -> dict[str, str]:

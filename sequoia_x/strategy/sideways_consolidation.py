@@ -21,13 +21,15 @@ class SidewaysConsolidationStrategy(BaseStrategy):
         *args,
         lookback_days: int = 20,
         max_amplitude_pct: float = 12.0,
-        near_high_pct: float = 3.0,
+        min_distance_pct: float = 0.0,
+        max_distance_pct: float = 3.0,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.lookback_days = lookback_days
         self.max_amplitude_pct = max_amplitude_pct
-        self.near_high_pct = near_high_pct
+        self.min_distance_pct = min_distance_pct
+        self.max_distance_pct = max_distance_pct
 
     def run(self) -> list[str]:
         return [row.symbol for row in self.run_with_details()]
@@ -89,7 +91,9 @@ class SidewaysConsolidationStrategy(BaseStrategy):
 
         if amplitude_pct > self.max_amplitude_pct:
             return None
-        if distance_to_high_pct > self.near_high_pct:
+        if distance_to_high_pct < self.min_distance_pct:
+            return None
+        if distance_to_high_pct > self.max_distance_pct:
             return None
 
         return StrategyResultRow(

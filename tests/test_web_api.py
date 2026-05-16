@@ -156,3 +156,47 @@ def test_backfill_api_passes_start_date_and_full_refresh(tmp_path) -> None:
     assert job["status"] == "succeeded"
     assert job["result"]["rows_written"] == 12
     assert engine.calls == [(["000001", "600000"], "1990-01-01", True)]
+
+
+def test_api_lists_local_stocks_with_names(tmp_path) -> None:
+    settings = Settings(
+        db_path=str(tmp_path / "stocks.db"),
+        start_date="2024-01-01",
+        feishu_webhook_url="https://example.com/hook",
+    )
+    engine = DataEngine(settings)
+    insert_rows(engine, "000001", make_rows(days=5, high=11.0, low=10.0, latest_close=10.8))
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO stock_basic(symbol, code, name, status, stock_type, updated_at)
+            VALUES ('000001', 'sz.000001', '平安银行', '1', '1', '2026-05-16T00:00:00')
+            """
+        )
+        conn.commit()
+    app = create_app(settings=settings, engine=engine, jobs=InMemoryJobManager(run_async=False))
+    client = TestClient(app)
+
+    response = client.get("/api/stocks?query=平安")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["symbol"] == "000001"
+    assert payload[0]["name"] == "平安银行"
+    assert payload[0]["row_count"] == 5
+    assert payload[0]["latest_date"] == "2026-01-05"
+
+
+def test_api_returns_ohlcv_tail(tmp_path) -> None:
+    client = make_app(tmp_path)
+
+    response = client.get("/api/stocks/000001/ohlcv?limit=3")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["symbol"] == "000001"
+    assert [row["date"] for row in payload["rows"]] == [
+        "2026-01-18",
+        "2026-01-19",
+        "2026-01-20",
+    ]

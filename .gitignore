@@ -33,6 +33,8 @@ build/
 
 # 日志
 *.log
+logs/
+runtime/
 
 # Hypothesis 测试缓存
 .hypothesis/

@@ -61,6 +61,40 @@
               <div class="panel-title">任务状态</div>
               <div id="jobPanel" class="job-panel muted">暂无运行中的任务</div>
             </div>
+
+            <div class="stock-browser">
+              <div class="panel stock-list-panel">
+                <div class="stock-list-head">
+                  <div class="panel-title">本地股票</div>
+                  <input id="stockSearch" type="text" placeholder="搜索名称或代码" />
+                </div>
+                <div class="stock-table-wrap">
+                  <table class="stock-table">
+                    <thead>
+                      <tr>
+                        <th>名称</th>
+                        <th>代码</th>
+                        <th>最新日期</th>
+                        <th>收盘</th>
+                        <th>样本</th>
+                      </tr>
+                    </thead>
+                    <tbody id="stockRows"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="panel chart-panel">
+                <div class="chart-head">
+                  <div>
+                    <div class="panel-title" id="chartTitle">K 线</div>
+                    <div class="muted" id="chartMeta">--</div>
+                  </div>
+                  <button id="reloadStocksBtn" class="secondary">刷新股票</button>
+                </div>
+                <canvas id="stockChart" width="900" height="420"></canvas>
+              </div>
+            </div>
           </section>
 
           <section id="strategyView" class="view">
