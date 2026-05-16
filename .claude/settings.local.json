@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python -c \"import py_compile; py_compile.compile\\('sequoia_x/data/engine.py', doraise=True\\); print\\('Syntax OK'\\)\")"
+    ]
+  }
+}

@@ -414,7 +414,7 @@ class DataEngine:
         full_refresh: bool = False,
         progress_callback: Callable[..., None] | None = None,
         source: str = "auto",
-    ) -> dict[str, int | str | bool]:
+    ) -> dict[str, int | str | bool | list[str]]:
         """批量回填历史日 K 线数据（后复权），支持双数据源。
 
         source:
@@ -426,6 +426,7 @@ class DataEngine:
         from datetime import date, timedelta
 
         today_str = date.today().strftime("%Y-%m-%d")
+        yesterday_str = (date.today() - timedelta(days=1)).strftime("%Y-%m-%d")
         effective_start_date = start_date or self.start_date
         date.fromisoformat(effective_start_date)
         total = len(symbols)
@@ -462,11 +463,12 @@ class DataEngine:
                 "start_date": effective_start_date,
                 "end_date": today_str,
                 "full_refresh": full_refresh,
+                "failed_symbols": [],
             }
 
         import baostock as bs
 
-        max_retries = 3
+        max_retries = 2
         reconnect_interval = 100
         code_by_symbol = self._get_baostock_code_map()
 
@@ -516,6 +518,7 @@ class DataEngine:
                 "start_date": effective_start_date,
                 "end_date": today_str,
                 "full_refresh": full_refresh,
+                "failed_symbols": symbols,
             }
 
         # 预过滤：一条 SQL 找出真正需要更新的股票，避免逐只检查 5000+ 只
@@ -524,7 +527,7 @@ class DataEngine:
             last_date_map: dict[str, str | None] = {}
             skipped_before = 0
         else:
-            working_symbols, last_date_map = self._get_stale_symbols(symbols, today_str)
+            working_symbols, last_date_map = self._get_stale_symbols(symbols, yesterday_str)
             skipped_before = total - len(working_symbols)
             if skipped_before > 0:
                 logger.info(
@@ -545,6 +548,7 @@ class DataEngine:
         failed = 0
         rows_written = 0
         since_reconnect = 0
+        failed_symbols: list[str] = []
 
         try:
             for i, symbol in enumerate(working_symbols):
@@ -579,12 +583,15 @@ class DataEngine:
                     time.sleep(1)
                     if not _login():
                         logger.error("重连失败，终止回填")
+                        remaining_failed = [working_symbols[j] for j in range(i, total)]
+                        failed_symbols.extend(remaining_failed)
+                        self._save_failed_symbols(failed_symbols)
                         _emit(
                             "baostock 重连失败，更新终止",
                             processed=processed,
                             success=success,
                             skipped=skipped,
-                            failed=failed + total - i,
+                            failed=failed + len(remaining_failed),
                             rows_written=rows_written,
                             current_symbol=symbol,
                             current_start_date=start,
@@ -594,11 +601,12 @@ class DataEngine:
                             "symbol_count": total,
                             "success": success,
                             "skipped": skipped,
-                            "failed": failed + total - i,
+                            "failed": failed + len(remaining_failed),
                             "rows_written": rows_written,
                             "start_date": effective_start_date,
                             "end_date": today_str,
                             "full_refresh": full_refresh,
+                            "failed_symbols": failed_symbols,
                         }
                     since_reconnect = 0
 
@@ -621,7 +629,7 @@ class DataEngine:
                 for attempt in range(max_retries):
                     try:
                         rows = _query_bs_with_timeout(
-                            bs, bs_code, start, today_str, timeout=45
+                            bs, bs_code, start, today_str, timeout=15
                         )
                         query_ok = True
                         break
@@ -653,6 +661,7 @@ class DataEngine:
                 if not query_ok:
                     # Baostock 全部重试失败，尝试 Tushare 容灾（source=baostock 时跳过）
                     if source != "baostock":
+                        logger.info(f"[{symbol}] Baostock 失败，尝试 Tushare 容灾")
                         df_ts = self._ts_fetch_history(symbol, start, today_str)
                     else:
                         df_ts = None
@@ -681,6 +690,7 @@ class DataEngine:
                         time.sleep(0.3)
                         continue
                     failed += 1
+                    failed_symbols.append(symbol)
                     _emit(
                         f"{symbol} 更新失败，继续下一只",
                         processed=processed + 1,
@@ -711,7 +721,7 @@ class DataEngine:
                     time.sleep(0.3)
                     continue
 
-                df = pd.DataFrame(rows, columns=rs.fields)
+                df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "volume", "amount"])
                 for col in ["open", "high", "low", "close", "volume", "amount"]:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
                 df = df.dropna(subset=["close"])
@@ -776,6 +786,8 @@ class DataEngine:
 
         total_skipped = skipped_before + skipped
         total_processed = total + skipped_before
+        if failed_symbols:
+            self._save_failed_symbols(failed_symbols)
         logger.info(
             f"回填完成 — 成功: {success} | 跳过: {total_skipped} | 失败: {failed}"
         )
@@ -797,6 +809,7 @@ class DataEngine:
             "start_date": effective_start_date,
             "end_date": today_str,
             "full_refresh": full_refresh,
+            "failed_symbols": failed_symbols,
         }
 
     # ── 股票列表 ──
@@ -841,7 +854,10 @@ class DataEngine:
             last_date_map: dict[str, str | None] = {}
             skipped_before = 0
         else:
-            working_symbols, last_date_map = self._get_stale_symbols(symbols, end_date)
+            from datetime import date as _date, timedelta as _timedelta
+
+            yesterday_str = (_date.today() - _timedelta(days=1)).strftime("%Y-%m-%d")
+            working_symbols, last_date_map = self._get_stale_symbols(symbols, yesterday_str)
             skipped_before = total - len(working_symbols)
             if skipped_before > 0:
                 logger.info(
@@ -976,6 +992,40 @@ class DataEngine:
                 ],
             )
             conn.commit()
+
+    def _failed_stocks_path(self) -> Path:
+        return Path(self.db_path).parent / "failed_stocks.json"
+
+    def _save_failed_symbols(self, symbols: list[str]) -> None:
+        import json
+
+        path = self._failed_stocks_path()
+        existing: list[str] = []
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                existing = []
+        merged = list(dict.fromkeys(existing + symbols))
+        path.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info(f"已保存 {len(symbols)} 只失败股票到 {path}（累计 {len(merged)} 只）")
+
+    def get_failed_symbols(self) -> list[str]:
+        import json
+
+        path = self._failed_stocks_path()
+        if not path.exists():
+            return []
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return []
+
+    def clear_failed_symbols(self) -> None:
+        path = self._failed_stocks_path()
+        if path.exists():
+            path.unlink()
+            logger.info("已清除失败股票记录")
 
     def _bs_fetch_stock_list(self) -> list[dict[str, str]]:
         """Baostock 获取全市场 A 股列表。"""
