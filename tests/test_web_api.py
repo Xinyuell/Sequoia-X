@@ -18,6 +18,14 @@ def make_app(tmp_path) -> TestClient:
     )
     engine = DataEngine(settings)
     insert_rows(engine, "000001", make_rows(days=20, high=11.0, low=10.0, latest_close=10.9))
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO stock_basic(symbol, code, name, status, stock_type, updated_at)
+            VALUES ('000001', 'sz.000001', '平安银行', '1', '1', '2026-05-16T00:00:00')
+            """
+        )
+        conn.commit()
     app = create_app(
         settings=settings,
         engine=engine,
@@ -95,6 +103,8 @@ def test_api_runs_sideways_strategy_with_parameters(tmp_path) -> None:
     payload = response.json()
     assert payload["total"] == 1
     assert payload["rows"][0]["symbol"] == "000001"
+    assert payload["rows"][0]["name"] == "平安银行"
+    assert payload["rows"][0]["stock"]["row_count"] == 20
     assert payload["rows"][0]["metrics"]["distance_to_high_pct"] < 3
 
 
@@ -201,3 +211,19 @@ def test_api_returns_ohlcv_tail(tmp_path) -> None:
         "2026-01-19",
         "2026-01-20",
     ]
+    assert payload["period"] == "day"
+    assert payload["stock"]["name"] == "平安银行"
+
+
+def test_api_returns_weekly_ohlcv(tmp_path) -> None:
+    client = make_app(tmp_path)
+
+    response = client.get("/api/stocks/000001/ohlcv?period=week&limit=2")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["period"] == "week"
+    assert len(payload["rows"]) == 2
+    assert payload["rows"][-1]["date"] == "2026-01-20"
+    assert payload["rows"][-1]["high"] == 11.0
+    assert payload["rows"][-1]["low"] == 10.0

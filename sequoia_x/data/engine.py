@@ -529,3 +529,127 @@ class DataEngine:
                 (symbol, limit),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_stock_summary(self, symbol: str) -> dict[str, object] | None:
+        """Return local stock name, coverage, and latest quote for one symbol."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                """
+                WITH coverage AS (
+                    SELECT
+                        symbol,
+                        COUNT(*) AS row_count,
+                        MIN(date) AS earliest_date,
+                        MAX(date) AS latest_date
+                    FROM stock_daily
+                    WHERE symbol = ?
+                    GROUP BY symbol
+                )
+                SELECT
+                    c.symbol,
+                    COALESCE(b.name, c.symbol) AS name,
+                    COALESCE(b.code, '') AS code,
+                    c.row_count,
+                    c.earliest_date,
+                    c.latest_date,
+                    sd.open,
+                    sd.high,
+                    sd.low,
+                    sd.close,
+                    sd.volume,
+                    sd.turnover
+                FROM coverage c
+                LEFT JOIN stock_basic b ON b.symbol = c.symbol
+                LEFT JOIN stock_daily sd
+                  ON sd.symbol = c.symbol
+                 AND sd.date = c.latest_date
+                """,
+                (symbol,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_ohlcv_series(
+        self,
+        symbol: str,
+        period: str = "day",
+        limit: int | None = None,
+    ) -> list[dict[str, object]]:
+        """Return OHLCV rows, optionally aggregated to week/month/quarter/year."""
+        period = period.lower()
+        if period not in {"day", "week", "month", "quarter", "year"}:
+            raise ValueError(f"Unsupported period: {period}")
+
+        with sqlite3.connect(self.db_path) as conn:
+            df = pd.read_sql(
+                """
+                SELECT symbol, date, open, high, low, close, volume, turnover
+                FROM stock_daily
+                WHERE symbol = ?
+                ORDER BY date ASC
+                """,
+                conn,
+                params=(symbol,),
+            )
+
+        if df.empty:
+            return []
+
+        for col in ["open", "high", "low", "close", "volume", "turnover"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = df.dropna(subset=["date", "open", "high", "low", "close"])
+        if df.empty:
+            return []
+
+        if period != "day":
+            rule = {
+                "week": "W-FRI",
+                "month": "ME",
+                "quarter": "QE",
+                "year": "YE",
+            }[period]
+            df["trade_date"] = pd.to_datetime(df["date"])
+            df = (
+                df.set_index("trade_date")
+                .resample(rule)
+                .agg(
+                    {
+                        "symbol": "last",
+                        "date": "last",
+                        "open": "first",
+                        "high": "max",
+                        "low": "min",
+                        "close": "last",
+                        "volume": "sum",
+                        "turnover": "sum",
+                    }
+                )
+                .dropna(subset=["date", "open", "high", "low", "close"])
+                .reset_index(drop=True)
+            )
+
+        if limit is not None and limit > 0:
+            df = df.tail(min(limit, 10000))
+
+        return [
+            {
+                "symbol": str(row.symbol),
+                "date": str(row.date),
+                "open": _clean_float(row.open),
+                "high": _clean_float(row.high),
+                "low": _clean_float(row.low),
+                "close": _clean_float(row.close),
+                "volume": _clean_float(row.volume),
+                "turnover": _clean_float(row.turnover),
+            }
+            for row in df.itertuples(index=False)
+        ]
+
+
+def _clean_float(value: object) -> float | None:
+    try:
+        if pd.isna(value):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None

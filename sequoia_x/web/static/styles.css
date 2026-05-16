@@ -478,6 +478,18 @@ tbody tr:last-child td {
   border-bottom: 0;
 }
 
+#resultRows tr {
+  cursor: pointer;
+}
+
+#resultRows tr:hover {
+  background: #f5faf9;
+}
+
+tbody tr.selected {
+  background: #eaf3f1;
+}
+
 .metric-list {
   display: flex;
   flex-wrap: wrap;
@@ -491,6 +503,109 @@ tbody tr:last-child td {
   background: #fff8ed;
   color: #6b4215;
   font-size: 12px;
+}
+
+.result-detail-panel {
+  margin-top: 16px;
+}
+
+.result-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.period-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.period-tab {
+  min-width: 54px;
+  min-height: 34px;
+  border-color: #b9c8c5;
+  background: #ffffff;
+  color: var(--primary-hover);
+}
+
+.period-tab:hover,
+.period-tab.active {
+  background: var(--primary);
+  color: #ffffff;
+}
+
+.detail-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.detail-stat {
+  min-height: 68px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.detail-stat-value {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.result-chart-shell {
+  min-width: 0;
+}
+
+#resultStockChart {
+  display: block;
+  width: 100%;
+  height: 460px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.range-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.range-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--primary);
+}
+
+#resultRangeLabel {
+  min-width: 260px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: right;
+}
+
+.quote-table-wrap {
+  margin-top: 14px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.quote-table {
+  min-width: 680px;
+}
+
+.quote-table th {
+  width: 160px;
 }
 
 @media (max-width: 980px) {
@@ -515,7 +630,8 @@ tbody tr:last-child td {
   .parameter-grid,
   .strategy-layout,
   .data-update-panel,
-  .stock-browser {
+  .stock-browser,
+  .detail-stat-grid {
     grid-template-columns: 1fr 1fr;
   }
 }
@@ -540,14 +656,29 @@ tbody tr:last-child td {
   .strategy-layout,
   .data-update-panel,
   .stock-browser,
+  .detail-stat-grid,
   .job-panel {
     grid-template-columns: 1fr;
   }
 
   .stock-list-head,
-  .chart-head {
+  .chart-head,
+  .result-detail-head {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .period-tabs {
+    justify-content: flex-start;
+  }
+
+  .range-row {
+    grid-template-columns: 1fr;
+  }
+
+  #resultRangeLabel {
+    min-width: 0;
+    text-align: left;
   }
 
   .stock-list-head input,

@@ -48,14 +48,22 @@ def create_api_router() -> APIRouter:
     def stock_ohlcv(
         request: Request,
         symbol: str,
-        limit: int = Query(default=120, ge=1, le=500),
+        period: str = Query(default="day", pattern="^(day|week|month|quarter|year)$"),
+        limit: int = Query(default=10000, ge=1, le=10000),
     ) -> dict[str, Any]:
         if not symbol.isdigit() or len(symbol) != 6:
             raise HTTPException(status_code=422, detail="symbol must be a 6-digit code")
-        rows = _engine(request).get_ohlcv_tail(symbol=symbol, limit=limit)
+        rows = _engine(request).get_ohlcv_series(symbol=symbol, period=period, limit=limit)
         if not rows:
             raise HTTPException(status_code=404, detail="No local OHLCV data for symbol")
-        return {"symbol": symbol, "rows": rows}
+        stock = _engine(request).get_stock_summary(symbol) or {"symbol": symbol}
+        return {
+            "symbol": symbol,
+            "period": period,
+            "total": len(rows),
+            "stock": stock,
+            "rows": rows,
+        }
 
     @router.post("/data/backfill")
     def start_backfill(request: Request, payload: BackfillRequest | None = None) -> dict[str, str]:
@@ -129,6 +137,7 @@ def create_api_router() -> APIRouter:
             row.to_dict() if isinstance(row, StrategyResultRow) else row
             for row in detail_rows
         ]
+        rows = [_with_stock_summary(_engine(request), row) for row in rows]
 
         return {
             "strategy_key": definition.key,
@@ -139,6 +148,24 @@ def create_api_router() -> APIRouter:
         }
 
     return router
+
+
+def _with_stock_summary(engine: DataEngine, row: dict[str, Any]) -> dict[str, Any]:
+    symbol = row.get("symbol")
+    if not isinstance(symbol, str):
+        return row
+    stock = engine.get_stock_summary(symbol)
+    if not stock:
+        return row
+    merged = dict(row)
+    merged["name"] = stock.get("name")
+    merged["code"] = stock.get("code")
+    merged["stock"] = stock
+    if merged.get("latest_date") is None:
+        merged["latest_date"] = stock.get("latest_date")
+    if merged.get("close") is None:
+        merged["close"] = stock.get("close")
+    return merged
 
 
 def summarize_market_data(engine: DataEngine) -> dict[str, Any]:

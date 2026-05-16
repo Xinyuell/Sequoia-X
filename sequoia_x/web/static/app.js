@@ -6,9 +6,32 @@ const state = {
   stockSearchTimer: null,
   stocks: [],
   selectedSymbol: null,
+  selectedResultSymbol: null,
+  resultPeriod: "day",
+  resultSeries: [],
+  resultSeriesStock: null,
+  resultWindowSize: 120,
 };
 
 const numberFormatter = new Intl.NumberFormat("zh-CN");
+const PERIOD_LABELS = {
+  day: "日K",
+  week: "周K",
+  month: "月K",
+  quarter: "季K",
+  year: "年K",
+};
+const METRIC_LABELS = {
+  window_high: "区间最高价",
+  window_low: "区间最低价",
+  amplitude_pct: "区间振幅",
+  distance_to_high_pct: "距区间高点",
+  lookback_days: "横盘交易日",
+  max_amplitude_pct: "最大区间振幅",
+  min_distance_pct: "距高点下限",
+  max_distance_pct: "距高点上限",
+  near_high_pct: "距区间高点不超过",
+};
 
 function byId(id) {
   return document.getElementById(id);
@@ -39,6 +62,10 @@ function bindActions() {
     selectStrategy(event.target.value);
   });
   byId("runStrategyBtn").addEventListener("click", runSelectedStrategy);
+  document.querySelectorAll("[data-result-period]").forEach((button) => {
+    button.addEventListener("click", () => selectResultPeriod(button.dataset.resultPeriod));
+  });
+  byId("resultRange").addEventListener("input", renderResultChartWindow);
 }
 
 async function loadInitialData() {
@@ -213,17 +240,24 @@ async function selectStock(symbol) {
   byId("chartMeta").textContent = "K 线加载中";
 
   try {
-    const payload = await api(`/api/stocks/${encodeURIComponent(symbol)}/ohlcv?limit=120`);
-    renderKlineChart(payload.rows || [], stock);
+    const payload = await api(`/api/stocks/${encodeURIComponent(symbol)}/ohlcv?period=day&limit=160`);
+    renderKlineChart(payload.rows || [], stock, {
+      canvasId: "stockChart",
+      titleId: "chartTitle",
+      metaId: "chartMeta",
+    });
   } catch (error) {
     renderEmptyChart(error.message);
   }
 }
 
-function renderEmptyChart(message) {
-  byId("chartTitle").textContent = "K 线";
-  byId("chartMeta").textContent = message;
-  const canvas = byId("stockChart");
+function renderEmptyChart(message, target = {}) {
+  const titleId = target.titleId || "chartTitle";
+  const metaId = target.metaId || "chartMeta";
+  const canvasId = target.canvasId || "stockChart";
+  byId(titleId).textContent = "K 线";
+  byId(metaId).textContent = message;
+  const canvas = byId(canvasId);
   const ctx = setupCanvas(canvas);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = "#65717d";
@@ -231,13 +265,16 @@ function renderEmptyChart(message) {
   ctx.fillText(message, 24, 42);
 }
 
-function renderKlineChart(rows, stock) {
-  const canvas = byId("stockChart");
+function renderKlineChart(rows, stock, target = {}) {
+  const canvasId = target.canvasId || "stockChart";
+  const titleId = target.titleId || "chartTitle";
+  const metaId = target.metaId || "chartMeta";
+  const canvas = byId(canvasId);
   const ctx = setupCanvas(canvas);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   if (!rows.length) {
-    renderEmptyChart("暂无 K 线数据");
+    renderEmptyChart("暂无 K 线数据", target);
     return;
   }
 
@@ -295,9 +332,9 @@ function renderKlineChart(rows, stock) {
   ctx.textAlign = "left";
 
   const latest = rows[rows.length - 1];
-  byId("chartMeta").textContent = `${latest.date}  开 ${formatMaybeNumber(latest.open)}  高 ${formatMaybeNumber(latest.high)}  低 ${formatMaybeNumber(latest.low)}  收 ${formatMaybeNumber(latest.close)}  量 ${formatNumber(latest.volume)}`;
+  byId(metaId).textContent = `${latest.date}  开 ${formatMaybeNumber(latest.open)}  高 ${formatMaybeNumber(latest.high)}  低 ${formatMaybeNumber(latest.low)}  收 ${formatMaybeNumber(latest.close)}  量 ${formatNumber(latest.volume)}`;
   if (stock) {
-    byId("chartTitle").textContent = `${stock.name || stock.symbol} ${stock.symbol}`;
+    byId(titleId).textContent = `${stock.name || stock.symbol} ${stock.symbol}`;
   }
 }
 
@@ -498,8 +535,10 @@ function collectParameters() {
 
 function renderResults(result) {
   byId("resultCount").textContent = `${formatNumber(result.total)} 只`;
+  const strategy = state.strategies.find((item) => item.key === result.strategy_key);
+  const parameterLabels = Object.fromEntries((strategy?.parameters || []).map((parameter) => [parameter.key, parameter.label]));
   const parameterText = Object.entries(result.parameters || {})
-    .map(([key, value]) => `${key}=${value}`)
+    .map(([key, value]) => `${parameterLabels[key] || metricLabel(key)}=${formatParameterValue(key, value)}`)
     .join("，");
   byId("resultMeta").textContent = parameterText
     ? `${result.strategy_name}；${parameterText}`
@@ -509,16 +548,25 @@ function renderResults(result) {
   if (rows.length === 0) {
     byId("resultRows").innerHTML = `
       <tr>
-        <td colspan="5" class="muted">没有符合条件的股票</td>
+        <td colspan="6" class="muted">没有符合条件的股票</td>
       </tr>
     `;
+    resetResultDetail();
     return;
+  }
+
+  if (!rows.some((row) => row.symbol === state.selectedResultSymbol)) {
+    state.selectedResultSymbol = rows[0].symbol;
   }
 
   byId("resultRows").innerHTML = rows
     .map(
       (row) => `
-        <tr>
+        <tr data-result-symbol="${escapeHtml(row.symbol || "")}" class="${row.symbol === state.selectedResultSymbol ? "selected" : ""}">
+          <td>
+            <strong>${escapeHtml(row.name || row.stock?.name || row.symbol || "--")}</strong>
+            <div class="muted">${escapeHtml(row.code || row.stock?.code || "")}</div>
+          </td>
           <td>${escapeHtml(row.symbol || "--")}</td>
           <td>${escapeHtml(row.latest_date || "--")}</td>
           <td>${escapeHtml(formatMaybeNumber(row.close))}</td>
@@ -528,6 +576,10 @@ function renderResults(result) {
       `,
     )
     .join("");
+  byId("resultRows").querySelectorAll("tr[data-result-symbol]").forEach((row) => {
+    row.addEventListener("click", () => selectResultStock(row.dataset.resultSymbol));
+  });
+  selectResultStock(state.selectedResultSymbol, { keepPeriod: true });
 }
 
 function renderMetrics(metrics) {
@@ -538,10 +590,203 @@ function renderMetrics(metrics) {
   return `
     <div class="metric-list">
       ${entries
-        .map(([key, value]) => `<span class="metric-chip">${escapeHtml(key)}: ${escapeHtml(formatMaybeNumber(value))}</span>`)
+        .map(([key, value]) => `<span class="metric-chip">${escapeHtml(metricLabel(key))}: ${escapeHtml(formatMetricValue(key, value))}</span>`)
         .join("")}
     </div>
   `;
+}
+
+function resetResultDetail() {
+  state.selectedResultSymbol = null;
+  state.resultSeries = [];
+  state.resultSeriesStock = null;
+  byId("resultDetailTitle").textContent = "股票详情";
+  byId("resultDetailMeta").textContent = "点击上方结果中的股票查看详情";
+  byId("resultMetricGrid").innerHTML = "";
+  byId("resultQuoteRows").innerHTML = "";
+  byId("resultRange").min = 0;
+  byId("resultRange").max = 0;
+  byId("resultRange").value = 0;
+  byId("resultRangeLabel").textContent = "--";
+  renderEmptyChart("暂无选中股票", {
+    canvasId: "resultStockChart",
+    titleId: "resultKlineTitle",
+    metaId: "resultKlineMeta",
+  });
+}
+
+function selectResultStock(symbol, options = {}) {
+  if (!state.result || !symbol) {
+    resetResultDetail();
+    return;
+  }
+  state.selectedResultSymbol = symbol;
+  if (!options.keepPeriod) {
+    state.resultPeriod = "day";
+  }
+  byId("resultRows").querySelectorAll("tr[data-result-symbol]").forEach((row) => {
+    row.classList.toggle("selected", row.dataset.resultSymbol === symbol);
+  });
+  loadResultStockDetail(symbol);
+}
+
+function selectResultPeriod(period) {
+  state.resultPeriod = period;
+  document.querySelectorAll("[data-result-period]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.resultPeriod === period);
+  });
+  if (state.selectedResultSymbol) {
+    loadResultStockDetail(state.selectedResultSymbol);
+  }
+}
+
+async function loadResultStockDetail(symbol) {
+  const selectedRow = (state.result?.rows || []).find((row) => row.symbol === symbol);
+  if (!selectedRow) {
+    resetResultDetail();
+    return;
+  }
+
+  document.querySelectorAll("[data-result-period]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.resultPeriod === state.resultPeriod);
+  });
+
+  byId("resultDetailTitle").textContent = `${selectedRow.name || selectedRow.stock?.name || symbol} ${symbol}`;
+  byId("resultDetailMeta").textContent = "K 线加载中";
+  renderResultMetricGrid(selectedRow);
+
+  try {
+    const payload = await api(
+      `/api/stocks/${encodeURIComponent(symbol)}/ohlcv?period=${encodeURIComponent(state.resultPeriod)}&limit=10000`,
+    );
+    state.resultSeries = payload.rows || [];
+    state.resultSeriesStock = payload.stock || selectedRow.stock || selectedRow;
+    byId("resultDetailTitle").textContent = `${state.resultSeriesStock.name || selectedRow.name || symbol} ${symbol}`;
+    renderResultQuoteRows(state.resultSeriesStock, selectedRow);
+    setupResultRange();
+    renderResultChartWindow();
+  } catch (error) {
+    renderEmptyChart(error.message, {
+      canvasId: "resultStockChart",
+      titleId: "resultKlineTitle",
+      metaId: "resultKlineMeta",
+    });
+    byId("resultDetailMeta").textContent = error.message;
+  }
+}
+
+function renderResultMetricGrid(row) {
+  const stock = row.stock || {};
+  const metrics = row.metrics || {};
+  const cards = [
+    ["名称", row.name || stock.name || row.symbol || "--"],
+    ["代码", row.symbol || "--"],
+    ["最新日期", row.latest_date || stock.latest_date || "--"],
+    ["收盘价", formatMaybeNumber(row.close ?? stock.close)],
+    ["数据起始", stock.earliest_date || "--"],
+    ["样本数量", formatNumber(stock.row_count || 0)],
+    ["开盘价", formatMaybeNumber(stock.open)],
+    ["最高价", formatMaybeNumber(stock.high)],
+    ["最低价", formatMaybeNumber(stock.low)],
+    ["成交量", formatNumber(stock.volume)],
+    ["成交额", formatMaybeNumber(stock.turnover)],
+    ...Object.entries(metrics).map(([key, value]) => [metricLabel(key), formatMetricValue(key, value)]),
+  ];
+  byId("resultMetricGrid").innerHTML = cards
+    .map(
+      ([label, value]) => `
+        <div class="detail-stat">
+          <div class="metric-label">${escapeHtml(label)}</div>
+          <div class="detail-stat-value">${escapeHtml(value)}</div>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function renderResultQuoteRows(stock, row) {
+  const items = [
+    ["股票名称", stock.name || row.name || "--"],
+    ["股票代码", stock.symbol || row.symbol || "--"],
+    ["交易所代码", stock.code || row.code || "--"],
+    ["本地最早日期", stock.earliest_date || "--"],
+    ["本地最新日期", stock.latest_date || row.latest_date || "--"],
+    ["本地行情行数", formatNumber(stock.row_count || 0)],
+    ["最新开盘", formatMaybeNumber(stock.open)],
+    ["最新最高", formatMaybeNumber(stock.high)],
+    ["最新最低", formatMaybeNumber(stock.low)],
+    ["最新收盘", formatMaybeNumber(stock.close ?? row.close)],
+    ["最新成交量", formatNumber(stock.volume)],
+    ["最新成交额", formatMaybeNumber(stock.turnover)],
+  ];
+  byId("resultQuoteRows").innerHTML = items
+    .map(([label, value]) => `<tr><th>${escapeHtml(label)}</th><td>${escapeHtml(value)}</td></tr>`)
+    .join("");
+}
+
+function setupResultRange() {
+  const range = byId("resultRange");
+  const total = state.resultSeries.length;
+  state.resultWindowSize = periodWindowSize(state.resultPeriod);
+  const maxStart = Math.max(0, total - state.resultWindowSize);
+  range.min = 0;
+  range.max = maxStart;
+  range.step = 1;
+  range.value = maxStart;
+  range.disabled = total <= state.resultWindowSize;
+}
+
+function renderResultChartWindow() {
+  const rows = state.resultSeries || [];
+  const range = byId("resultRange");
+  if (!rows.length) {
+    byId("resultRangeLabel").textContent = "--";
+    renderEmptyChart("暂无 K 线数据", {
+      canvasId: "resultStockChart",
+      titleId: "resultKlineTitle",
+      metaId: "resultKlineMeta",
+    });
+    return;
+  }
+
+  const start = Number.parseInt(range.value || "0", 10);
+  const end = Math.min(rows.length, start + state.resultWindowSize);
+  const windowRows = rows.slice(start, end);
+  byId("resultRangeLabel").textContent =
+    `${PERIOD_LABELS[state.resultPeriod]}：${windowRows[0].date} 至 ${windowRows[windowRows.length - 1].date}，共 ${formatNumber(rows.length)} 条`;
+  renderKlineChart(windowRows, state.resultSeriesStock, {
+    canvasId: "resultStockChart",
+    titleId: "resultKlineTitle",
+    metaId: "resultKlineMeta",
+  });
+}
+
+function periodWindowSize(period) {
+  return {
+    day: 140,
+    week: 120,
+    month: 120,
+    quarter: 100,
+    year: 80,
+  }[period] || 120;
+}
+
+function metricLabel(key) {
+  return METRIC_LABELS[key] || key;
+}
+
+function formatMetricValue(key, value) {
+  if (key.endsWith("_pct")) {
+    return `${formatMaybeNumber(value)}%`;
+  }
+  return formatMaybeNumber(value);
+}
+
+function formatParameterValue(key, value) {
+  if (key.endsWith("_pct")) {
+    return `${formatMaybeNumber(value)}%`;
+  }
+  return formatMaybeNumber(value);
 }
 
 function showStrategyMessage(text, kind) {
