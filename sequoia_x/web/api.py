@@ -2,6 +2,7 @@
 
 import sqlite3
 from datetime import date
+from inspect import Parameter, signature
 from pathlib import Path
 from typing import Any, Literal
 
@@ -139,6 +140,50 @@ def create_api_router() -> APIRouter:
         strategy_key: str,
         payload: StrategyRunRequest,
     ) -> dict[str, Any]:
+        return _run_strategy(request, strategy_key, payload)
+
+    @router.post("/strategies/{strategy_key}/run-job")
+    def start_strategy_job(
+        request: Request,
+        strategy_key: str,
+        payload: StrategyRunRequest,
+    ) -> dict[str, str]:
+        try:
+            definition = get_strategy_definition(strategy_key)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown strategy: {strategy_key}") from exc
+
+        def work(progress: Any) -> dict[str, Any]:
+            progress(
+                message=f"{definition.name} 正在运行",
+                total=0,
+                processed=0,
+                matched=0,
+                current_action="准备策略",
+                strategy_key=definition.key,
+                strategy_name=definition.name,
+            )
+            result = _run_strategy(request, strategy_key, payload, progress_callback=progress)
+            progress(
+                message=f"{definition.name} 运行完成",
+                matched=result["total"],
+                current_action="完成",
+                strategy_key=definition.key,
+                strategy_name=definition.name,
+            )
+            return result
+
+        return _start_job(request, "strategy", f"{definition.name} 已排队", work)
+
+    return router
+
+
+def _run_strategy(
+    request: Request,
+    strategy_key: str,
+    payload: StrategyRunRequest,
+    progress_callback: Any | None = None,
+) -> dict[str, Any]:
         try:
             definition = get_strategy_definition(strategy_key)
         except KeyError as exc:
@@ -155,7 +200,10 @@ def create_api_router() -> APIRouter:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         if hasattr(strategy, "run_with_details"):
-            detail_rows = strategy.run_with_details()
+            if progress_callback is not None and _accepts_keyword(strategy.run_with_details, "progress_callback"):
+                detail_rows = strategy.run_with_details(progress_callback=progress_callback)
+            else:
+                detail_rows = strategy.run_with_details()
         else:
             detail_rows = [
                 _symbol_to_result_row(_engine(request), symbol)
@@ -176,7 +224,16 @@ def create_api_router() -> APIRouter:
             "rows": rows,
         }
 
-    return router
+
+def _accepts_keyword(func: Any, keyword: str) -> bool:
+    try:
+        parameters = signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind == Parameter.VAR_KEYWORD or parameter.name == keyword
+        for parameter in parameters
+    )
 
 
 def _with_stock_summary(engine: DataEngine, row: dict[str, Any]) -> dict[str, Any]:

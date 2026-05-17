@@ -1,5 +1,6 @@
 """Configurable sideways consolidation strategy."""
 
+from collections.abc import Callable
 from math import isfinite
 
 import pandas as pd
@@ -34,10 +35,24 @@ class SidewaysConsolidationStrategy(BaseStrategy):
     def run(self) -> list[str]:
         return [row.symbol for row in self.run_with_details()]
 
-    def run_with_details(self) -> list[StrategyResultRow]:
+    def run_with_details(
+        self,
+        progress_callback: Callable[..., None] | None = None,
+    ) -> list[StrategyResultRow]:
         rows: list[StrategyResultRow] = []
+        symbols = self.engine.get_local_symbols()
+        total = len(symbols)
 
-        for symbol in self.engine.get_local_symbols():
+        for index, symbol in enumerate(symbols, start=1):
+            if progress_callback is not None:
+                progress_callback(
+                    message=f"正在计算 {symbol}",
+                    total=total,
+                    processed=index - 1,
+                    current_symbol=symbol,
+                    current_action="策略计算",
+                    matched=len(rows),
+                )
             try:
                 row = self._evaluate_symbol(symbol)
             except Exception as exc:
@@ -45,6 +60,15 @@ class SidewaysConsolidationStrategy(BaseStrategy):
                 continue
             if row is not None:
                 rows.append(row)
+            if progress_callback is not None:
+                progress_callback(
+                    message=f"已计算 {symbol}",
+                    total=total,
+                    processed=index,
+                    current_symbol=symbol,
+                    current_action="策略计算完成",
+                    matched=len(rows),
+                )
 
         rows.sort(
             key=lambda row: (
@@ -107,4 +131,3 @@ class SidewaysConsolidationStrategy(BaseStrategy):
                 "distance_to_high_pct": round(distance_to_high_pct, 4),
             },
         )
-

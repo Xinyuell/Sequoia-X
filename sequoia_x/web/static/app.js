@@ -3,6 +3,7 @@ const state = {
   selectedStrategy: null,
   result: null,
   pollTimer: null,
+  strategyPollTimer: null,
   stockSearchTimer: null,
   stocks: [],
   selectedSymbol: null,
@@ -523,7 +524,9 @@ async function runSelectedStrategy() {
   }
 
   byId("runStrategyBtn").disabled = true;
-  showStrategyMessage("策略运行中", "");
+  clearTimeout(state.strategyPollTimer);
+  showStrategyMessage("", "");
+  renderStrategyProgress({ status: "queued", message: "策略已排队", progress: {} });
 
   try {
     const parameters = collectParameters();
@@ -532,19 +535,70 @@ async function runSelectedStrategy() {
     if (referenceDate) {
       body.reference_date = referenceDate;
     }
-    const result = await api(`/api/strategies/${encodeURIComponent(state.selectedStrategy.key)}/run`, {
+    const job = await api(`/api/strategies/${encodeURIComponent(state.selectedStrategy.key)}/run-job`, {
       method: "POST",
       body: JSON.stringify(body),
     });
-    state.result = result;
-    renderResults(result);
-    showStrategyMessage(`运行完成：${result.total} 只`, "ok");
-    switchView("resultsView");
+    renderStrategyProgress(job);
+    pollStrategyJob(job.job_id);
   } catch (error) {
     showStrategyMessage(error.message, "error");
-  } finally {
+    renderStrategyProgress(null);
     byId("runStrategyBtn").disabled = false;
   }
+}
+
+async function pollStrategyJob(jobId) {
+  try {
+    const job = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
+    renderStrategyProgress(job);
+    if (job.status === "queued" || job.status === "running") {
+      state.strategyPollTimer = setTimeout(() => pollStrategyJob(jobId), 900);
+      return;
+    }
+
+    byId("runStrategyBtn").disabled = false;
+    if (job.status === "succeeded") {
+      state.result = job.result;
+      renderResults(job.result);
+      showStrategyMessage(`运行完成：${job.result.total} 只`, "ok");
+      switchView("resultsView");
+      return;
+    }
+    showStrategyMessage(job.error || "策略运行失败", "error");
+  } catch (error) {
+    showStrategyMessage(error.message, "error");
+    byId("runStrategyBtn").disabled = false;
+  }
+}
+
+function renderStrategyProgress(job) {
+  const panel = byId("strategyProgress");
+  if (!job) {
+    panel.className = "strategy-progress-panel muted";
+    panel.textContent = "暂无运行中的策略";
+    return;
+  }
+  const progress = job.progress || {};
+  const total = Number(progress.total || 0);
+  const processed = Number(progress.processed || 0);
+  const percent = total > 0 ? Math.min(100, Math.round(processed / total * 100)) : 0;
+  const statusText = jobStatusLabel(job.status);
+  const matched = Number(progress.matched || 0);
+  panel.className = "strategy-progress-panel";
+  panel.innerHTML = `
+    <div class="strategy-progress-line">
+      <strong>${escapeHtml(progress.strategy_name || state.selectedStrategy?.name || "策略")}</strong>
+      <span>${escapeHtml(statusText)}</span>
+      <span>${total > 0 ? `${formatNumber(processed)} / ${formatNumber(total)}（${percent}%）` : "--"}</span>
+      <span>命中 ${formatNumber(matched)} 只</span>
+      <span>${escapeHtml(progress.current_symbol || "--")}</span>
+    </div>
+    <div class="job-progress-track">
+      <div class="job-progress-bar" style="width: ${percent}%"></div>
+    </div>
+    <div class="muted">${escapeHtml(job.message || progress.current_action || "")}</div>
+  `;
 }
 
 function collectParameters() {
@@ -577,10 +631,11 @@ function renderResults(result) {
     : result.strategy_name;
 
   const rows = result.rows || [];
+  renderResultHeader(result.strategy_key);
   if (rows.length === 0) {
     byId("resultRows").innerHTML = `
       <tr>
-        <td colspan="6" class="muted">没有符合条件的股票</td>
+        <td colspan="${resultColumnCount(result.strategy_key)}" class="muted">没有符合条件的股票</td>
       </tr>
     `;
     resetResultDetail();
@@ -591,27 +646,90 @@ function renderResults(result) {
     state.selectedResultSymbol = rows[0].symbol;
   }
 
-  byId("resultRows").innerHTML = rows
-    .map(
-      (row) => `
-        <tr data-result-symbol="${escapeHtml(row.symbol || "")}" class="${row.symbol === state.selectedResultSymbol ? "selected" : ""}">
-          <td>
-            <strong>${escapeHtml(row.name || row.stock?.name || row.symbol || "--")}</strong>
-            <div class="muted">${escapeHtml(row.code || row.stock?.code || "")}</div>
-          </td>
-          <td>${escapeHtml(row.symbol || "--")}</td>
-          <td>${escapeHtml(row.latest_date || "--")}</td>
-          <td>${escapeHtml(formatMaybeNumber(row.close))}</td>
-          <td>${escapeHtml(result.strategy_name)}</td>
-          <td>${renderMetrics(row.metrics || {})}</td>
-        </tr>
-      `,
-    )
+  renderResultRows();
+  selectResultStock(state.selectedResultSymbol, { keepPeriod: true, skipRender: true });
+}
+
+function renderResultHeader(strategyKey) {
+  const headers = strategyKey === "sideways_consolidation"
+    ? ["名称", "代码", "最新日期", "收盘价", "区间振幅", "距区间高点"]
+    : ["名称", "代码", "最新日期", "收盘价", "策略", "指标"];
+  byId("resultHeadRow").innerHTML = headers
+    .map((header) => `<th>${escapeHtml(header)}</th>`)
     .join("");
+}
+
+function resultColumnCount(strategyKey) {
+  return strategyKey === "sideways_consolidation" ? 6 : 6;
+}
+
+function renderResultRows() {
+  const result = state.result;
+  const rows = result?.rows || [];
+  if (!result || rows.length === 0) {
+    return;
+  }
+  const columnCount = resultColumnCount(result.strategy_key);
+  byId("resultRows").innerHTML = rows
+    .map((row) => renderResultRow(row, result, columnCount))
+    .join("");
+  mountResultDetailPanel();
   byId("resultRows").querySelectorAll("tr[data-result-symbol]").forEach((row) => {
     row.addEventListener("click", () => selectResultStock(row.dataset.resultSymbol));
   });
-  selectResultStock(state.selectedResultSymbol, { keepPeriod: true });
+}
+
+function renderResultRow(row, result, columnCount) {
+  const selected = row.symbol === state.selectedResultSymbol;
+  const cells = result.strategy_key === "sideways_consolidation"
+    ? renderSidewaysResultCells(row)
+    : renderDefaultResultCells(row, result.strategy_name);
+  const detail = selected
+    ? `<tr class="result-detail-row"><td colspan="${columnCount}"><div id="inlineResultDetailMount"></div></td></tr>`
+    : "";
+  return `
+    <tr data-result-symbol="${escapeHtml(row.symbol || "")}" class="result-main-row ${selected ? "selected" : ""}">
+      ${cells}
+    </tr>
+    ${detail}
+  `;
+}
+
+function renderDefaultResultCells(row, strategyName) {
+  return `
+    <td>
+      <strong>${escapeHtml(row.name || row.stock?.name || row.symbol || "--")}</strong>
+      <div class="muted">${escapeHtml(row.code || row.stock?.code || "")}</div>
+    </td>
+    <td>${escapeHtml(row.symbol || "--")}</td>
+    <td>${escapeHtml(row.latest_date || "--")}</td>
+    <td>${escapeHtml(formatMaybeNumber(row.close))}</td>
+    <td>${escapeHtml(strategyName)}</td>
+    <td>${renderMetrics(row.metrics || {})}</td>
+  `;
+}
+
+function renderSidewaysResultCells(row) {
+  const metrics = row.metrics || {};
+  return `
+    <td>
+      <strong>${escapeHtml(row.name || row.stock?.name || row.symbol || "--")}</strong>
+      <div class="muted">${escapeHtml(row.code || row.stock?.code || "")}</div>
+    </td>
+    <td>${escapeHtml(row.symbol || "--")}</td>
+    <td>${escapeHtml(row.latest_date || "--")}</td>
+    <td>${escapeHtml(formatMaybeNumber(row.close))}</td>
+    <td>${escapeHtml(formatMetricValue("amplitude_pct", metrics.amplitude_pct))}</td>
+    <td>${escapeHtml(formatMetricValue("distance_to_high_pct", metrics.distance_to_high_pct))}</td>
+  `;
+}
+
+function mountResultDetailPanel() {
+  const panel = byId("resultDetailPanel");
+  const mount = byId("inlineResultDetailMount");
+  if (mount && panel) {
+    mount.appendChild(panel);
+  }
 }
 
 function renderMetrics(metrics) {
@@ -632,6 +750,11 @@ function resetResultDetail() {
   state.selectedResultSymbol = null;
   state.resultSeries = [];
   state.resultSeriesStock = null;
+  const home = byId("resultDetailHome");
+  const panel = byId("resultDetailPanel");
+  if (home && panel) {
+    home.appendChild(panel);
+  }
   byId("resultDetailTitle").textContent = "股票详情";
   byId("resultDetailMeta").textContent = "点击上方结果中的股票查看详情";
   byId("resultMetricGrid").innerHTML = "";
@@ -656,9 +779,9 @@ function selectResultStock(symbol, options = {}) {
   if (!options.keepPeriod) {
     state.resultPeriod = "day";
   }
-  byId("resultRows").querySelectorAll("tr[data-result-symbol]").forEach((row) => {
-    row.classList.toggle("selected", row.dataset.resultSymbol === symbol);
-  });
+  if (!options.skipRender) {
+    renderResultRows();
+  }
   loadResultStockDetail(symbol);
 }
 
@@ -808,6 +931,9 @@ function metricLabel(key) {
 }
 
 function formatMetricValue(key, value) {
+  if (value === null || value === undefined || value === "") {
+    return "--";
+  }
   if (key.endsWith("_pct")) {
     return `${formatMaybeNumber(value)}%`;
   }

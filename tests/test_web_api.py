@@ -108,6 +108,29 @@ def test_api_runs_sideways_strategy_with_parameters(tmp_path) -> None:
     assert payload["rows"][0]["metrics"]["distance_to_high_pct"] < 3
 
 
+def test_api_runs_strategy_as_progress_job(tmp_path) -> None:
+    client = make_app(tmp_path)
+
+    response = client.post(
+        "/api/strategies/sideways_consolidation/run-job",
+        json={
+            "parameters": {
+                "lookback_days": 20,
+                "max_amplitude_pct": 12,
+                "min_distance_pct": 0,
+                "max_distance_pct": 3,
+            }
+        },
+    )
+
+    assert response.status_code == 200
+    job = client.get(f"/api/jobs/{response.json()['job_id']}").json()
+    assert job["status"] == "succeeded"
+    assert job["result"]["total"] == 1
+    assert job["progress"]["strategy_key"] == "sideways_consolidation"
+    assert job["progress"]["matched"] == 1
+
+
 def test_api_rejects_invalid_strategy_parameters(tmp_path) -> None:
     client = make_app(tmp_path)
 

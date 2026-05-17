@@ -395,17 +395,44 @@ input:focus {
 
 .parameter-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
   gap: 12px;
 }
 
 .parameter-field {
-  min-height: 98px;
-  padding: 14px;
+  min-height: 82px;
+  padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
   box-shadow: var(--shadow);
+}
+
+.strategy-progress-panel {
+  display: grid;
+  gap: 8px;
+  min-height: 58px;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: var(--shadow);
+  font-size: 14px;
+}
+
+.strategy-progress-panel.muted {
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+}
+
+.strategy-progress-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: center;
 }
 
 .input-with-unit {
@@ -467,7 +494,7 @@ input:focus {
 
 table {
   width: 100%;
-  min-width: 760px;
+  min-width: 820px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -496,12 +523,18 @@ tbody tr:last-child td {
   border-bottom: 0;
 }
 
-#resultRows tr {
+#resultRows tr.result-main-row {
   cursor: pointer;
 }
 
-#resultRows tr:hover {
+#resultRows tr.result-main-row:hover {
   background: #f5faf9;
+}
+
+#resultRows tr.result-detail-row td {
+  padding: 0;
+  background: #ffffff;
+  cursor: default;
 }
 
 tbody tr.selected {
@@ -524,7 +557,18 @@ tbody tr.selected {
 }
 
 .result-detail-panel {
+  margin: 0;
+  border-width: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+#resultDetailHome > .result-detail-panel {
   margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
 }
 
 .result-detail-head {
