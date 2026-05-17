@@ -109,7 +109,8 @@ function Restart-WebUI {
 }
 
 function Open-Browser {
-    Start-Process $Url
+    $freshUrl = "${Url}?v=$(Get-Date -Format 'yyyyMMddHHmmss')"
+    Start-Process $freshUrl
 }
 
 function Install-DailyTask {

@@ -73,6 +73,16 @@ def test_data_summary_returns_sqlite_counts(tmp_path) -> None:
     assert payload["has_data"] is True
 
 
+def test_static_assets_are_not_cached(tmp_path) -> None:
+    client = make_app(tmp_path)
+
+    index_response = client.get("/")
+    app_response = client.get("/static/app.js")
+
+    assert "no-store" in index_response.headers["cache-control"]
+    assert "no-store" in app_response.headers["cache-control"]
+
+
 def test_api_lists_strategy_metadata(tmp_path) -> None:
     client = make_app(tmp_path)
 

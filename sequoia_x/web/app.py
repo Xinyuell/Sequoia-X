@@ -31,6 +31,15 @@ def create_app(
     app.state.engine = engine
     app.state.jobs = jobs
 
+    @app.middleware("http")
+    async def no_cache_static_assets(request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     app.include_router(create_api_router())
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -46,4 +55,3 @@ def _load_web_settings() -> Settings:
         return get_settings()
     except ValidationError:
         return Settings(feishu_webhook_url="https://example.com/sequoia-x-webui-disabled")
-

@@ -63,10 +63,17 @@ function bindActions() {
     selectStrategy(event.target.value);
   });
   byId("runStrategyBtn").addEventListener("click", runSelectedStrategy);
-  document.querySelectorAll("[data-result-period]").forEach((button) => {
-    button.addEventListener("click", () => selectResultPeriod(button.dataset.resultPeriod));
+  byId("resultsView").addEventListener("click", (event) => {
+    const periodButton = event.target.closest("[data-result-period]");
+    if (periodButton) {
+      selectResultPeriod(periodButton.dataset.resultPeriod);
+    }
   });
-  byId("resultRange").addEventListener("input", renderResultChartWindow);
+  byId("resultsView").addEventListener("input", (event) => {
+    if (event.target.id === "resultRange") {
+      renderResultChartWindow();
+    }
+  });
 }
 
 async function loadInitialData() {
@@ -673,7 +680,6 @@ function renderResultRows() {
   byId("resultRows").innerHTML = rows
     .map((row) => renderResultRow(row, result, columnCount))
     .join("");
-  mountResultDetailPanel();
   byId("resultRows").querySelectorAll("tr[data-result-symbol]").forEach((row) => {
     row.addEventListener("click", () => selectResultStock(row.dataset.resultSymbol));
   });
@@ -685,7 +691,7 @@ function renderResultRow(row, result, columnCount) {
     ? renderSidewaysResultCells(row)
     : renderDefaultResultCells(row, result.strategy_name);
   const detail = selected
-    ? `<tr class="result-detail-row"><td colspan="${columnCount}"><div id="inlineResultDetailMount"></div></td></tr>`
+    ? `<tr class="result-detail-row"><td colspan="${columnCount}">${resultDetailPanelHtml()}</td></tr>`
     : "";
   return `
     <tr data-result-symbol="${escapeHtml(row.symbol || "")}" class="result-main-row ${selected ? "selected" : ""}">
@@ -724,12 +730,46 @@ function renderSidewaysResultCells(row) {
   `;
 }
 
-function mountResultDetailPanel() {
-  const panel = byId("resultDetailPanel");
-  const mount = byId("inlineResultDetailMount");
-  if (mount && panel) {
-    mount.appendChild(panel);
-  }
+function resultDetailPanelHtml() {
+  return `
+    <div id="resultDetailPanel" class="panel result-detail-panel">
+      <div class="result-detail-head">
+        <div>
+          <div class="panel-title" id="resultDetailTitle">股票详情</div>
+          <div class="muted" id="resultDetailMeta">点击上方结果中的股票查看详情</div>
+        </div>
+        <div class="period-tabs" aria-label="K 线周期">
+          <button class="period-tab ${state.resultPeriod === "day" ? "active" : ""}" data-result-period="day">日K</button>
+          <button class="period-tab ${state.resultPeriod === "week" ? "active" : ""}" data-result-period="week">周K</button>
+          <button class="period-tab ${state.resultPeriod === "month" ? "active" : ""}" data-result-period="month">月K</button>
+          <button class="period-tab ${state.resultPeriod === "quarter" ? "active" : ""}" data-result-period="quarter">季K</button>
+          <button class="period-tab ${state.resultPeriod === "year" ? "active" : ""}" data-result-period="year">年K</button>
+        </div>
+      </div>
+
+      <div id="resultMetricGrid" class="detail-stat-grid"></div>
+
+      <div class="result-chart-shell">
+        <div class="chart-head">
+          <div>
+            <div class="panel-title" id="resultKlineTitle">K 线</div>
+            <div class="muted" id="resultKlineMeta">--</div>
+          </div>
+        </div>
+        <canvas id="resultStockChart" width="900" height="460"></canvas>
+        <div class="range-row">
+          <input id="resultRange" type="range" min="0" max="0" value="0" />
+          <span id="resultRangeLabel">--</span>
+        </div>
+      </div>
+
+      <div class="quote-table-wrap">
+        <table class="quote-table">
+          <tbody id="resultQuoteRows"></tbody>
+        </table>
+      </div>
+    </div>
+  `;
 }
 
 function renderMetrics(metrics) {
@@ -750,24 +790,7 @@ function resetResultDetail() {
   state.selectedResultSymbol = null;
   state.resultSeries = [];
   state.resultSeriesStock = null;
-  const home = byId("resultDetailHome");
-  const panel = byId("resultDetailPanel");
-  if (home && panel) {
-    home.appendChild(panel);
-  }
-  byId("resultDetailTitle").textContent = "股票详情";
-  byId("resultDetailMeta").textContent = "点击上方结果中的股票查看详情";
-  byId("resultMetricGrid").innerHTML = "";
-  byId("resultQuoteRows").innerHTML = "";
-  byId("resultRange").min = 0;
-  byId("resultRange").max = 0;
-  byId("resultRange").value = 0;
-  byId("resultRangeLabel").textContent = "--";
-  renderEmptyChart("暂无选中股票", {
-    canvasId: "resultStockChart",
-    titleId: "resultKlineTitle",
-    metaId: "resultKlineMeta",
-  });
+  byId("resultDetailHome").innerHTML = "";
 }
 
 function selectResultStock(symbol, options = {}) {
