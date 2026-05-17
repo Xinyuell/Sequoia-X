@@ -1,8 +1,9 @@
 """数据引擎模块：负责 SQLite 行情数据存储与 baostock 增量同步。"""
 
+import json
 import sqlite3
 from collections.abc import Callable
-from datetime import date, timedelta
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -40,12 +41,66 @@ CREATE TABLE IF NOT EXISTS stock_basic (
     name       TEXT,
     status     TEXT,
     stock_type TEXT,
+    market     TEXT,
+    list_date  TEXT,
+    out_date   TEXT,
+    industry_board_code TEXT,
+    industry_board_name TEXT,
+    concept_board_codes_json TEXT,
+    concept_board_names_json TEXT,
+    board_updated_at TEXT,
     updated_at TEXT NOT NULL
 );
 """
 
 _CREATE_STOCK_BASIC_NAME_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_stock_basic_name ON stock_basic (name);
+"""
+
+_STOCK_BASIC_EXTRA_COLUMNS = {
+    "market": "TEXT",
+    "list_date": "TEXT",
+    "out_date": "TEXT",
+    "industry_board_code": "TEXT",
+    "industry_board_name": "TEXT",
+    "concept_board_codes_json": "TEXT",
+    "concept_board_names_json": "TEXT",
+    "board_updated_at": "TEXT",
+}
+
+_CREATE_STOCK_BOARDS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS stock_boards (
+    board_code TEXT NOT NULL,
+    board_name TEXT NOT NULL,
+    board_type TEXT NOT NULL,
+    source     TEXT,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (board_type, board_code)
+);
+"""
+
+_CREATE_STOCK_BOARD_MEMBERS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS stock_board_members (
+    symbol     TEXT NOT NULL,
+    board_code TEXT NOT NULL,
+    board_type TEXT NOT NULL,
+    board_name TEXT NOT NULL,
+    source     TEXT,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, board_type, board_code)
+);
+"""
+
+_CREATE_STOCK_BOARDS_TYPE_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_stock_boards_type_name ON stock_boards (board_type, board_name);
+"""
+
+_CREATE_STOCK_BOARD_MEMBERS_SYMBOL_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_stock_board_members_symbol ON stock_board_members (symbol);
+"""
+
+_CREATE_STOCK_BOARD_MEMBERS_BOARD_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_stock_board_members_board ON stock_board_members (board_type, board_code);
 """
 
 
@@ -267,13 +322,51 @@ class DataEngine:
 
     def _init_db(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as conn:
+        conn = sqlite3.connect(self.db_path)
+        try:
             conn.execute(_CREATE_TABLE_SQL)
             conn.execute(_CREATE_INDEX_SQL)
             conn.execute(_CREATE_STOCK_BASIC_TABLE_SQL)
+            self._ensure_columns(conn, "stock_basic", _STOCK_BASIC_EXTRA_COLUMNS)
+            self._backfill_stock_basic_derived_fields(conn)
             conn.execute(_CREATE_STOCK_BASIC_NAME_INDEX_SQL)
+            conn.execute(_CREATE_STOCK_BOARDS_TABLE_SQL)
+            conn.execute(_CREATE_STOCK_BOARD_MEMBERS_TABLE_SQL)
+            conn.execute(_CREATE_STOCK_BOARDS_TYPE_INDEX_SQL)
+            conn.execute(_CREATE_STOCK_BOARD_MEMBERS_SYMBOL_INDEX_SQL)
+            conn.execute(_CREATE_STOCK_BOARD_MEMBERS_BOARD_INDEX_SQL)
             conn.commit()
+        finally:
+            conn.close()
         logger.info(f"数据库初始化完成：{self.db_path}")
+
+    @staticmethod
+    def _ensure_columns(
+        conn: sqlite3.Connection,
+        table: str,
+        columns: dict[str, str],
+    ) -> None:
+        existing = {
+            row[1]
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for column, definition in columns.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    @staticmethod
+    def _backfill_stock_basic_derived_fields(conn: sqlite3.Connection) -> None:
+        conn.execute(
+            """
+            UPDATE stock_basic
+            SET market = CASE
+                WHEN LOWER(COALESCE(code, '')) LIKE 'sh.%' OR symbol LIKE '6%' OR symbol LIKE '9%' THEN 'SH'
+                WHEN LOWER(COALESCE(code, '')) LIKE 'bj.%' OR symbol LIKE '4%' OR symbol LIKE '8%' THEN 'BJ'
+                ELSE 'SZ'
+            END
+            WHERE market IS NULL OR market = ''
+            """
+        )
 
     def _get_last_date(self, symbol: str) -> str | None:
         with sqlite3.connect(self.db_path) as conn:
@@ -322,6 +415,16 @@ class DataEngine:
             return f"{symbol}.BJ"
         return f"{symbol}.SZ"
 
+    @staticmethod
+    def _market_from_code(code: str, symbol: str | None = None) -> str:
+        normalized = (code or "").upper()
+        plain_symbol = symbol or normalized.split(".")[-1]
+        if normalized.startswith("SH.") or normalized.endswith(".SH") or plain_symbol.startswith(("6", "9")):
+            return "SH"
+        if normalized.startswith("BJ.") or normalized.endswith(".BJ") or plain_symbol.startswith(("4", "8")):
+            return "BJ"
+        return "SZ"
+
     def _get_ts_pro(self):
         """懒初始化 Tushare Pro 客户端，未配置 token 返回 None。"""
         if not self.tushare_token:
@@ -342,7 +445,7 @@ class DataEngine:
             df = pro.stock_basic(
                 exchange="",
                 list_status="L",
-                fields="ts_code,symbol,name",
+                fields="ts_code,symbol,name,list_date",
             )
             if df is None or df.empty:
                 return None
@@ -355,6 +458,9 @@ class DataEngine:
                         "name": str(row["name"]),
                         "status": "1",
                         "stock_type": "1",
+                        "market": self._market_from_code(str(row["ts_code"]), str(row["symbol"])),
+                        "list_date": _format_compact_date(row.get("list_date")),
+                        "out_date": "",
                     }
                 )
             logger.info(f"Tushare 获取股票列表完成，共 {len(records)} 只")
@@ -1120,20 +1226,24 @@ class DataEngine:
             conn.commit()
 
     def _write_stock_basic(self, records: list[dict[str, str]]) -> None:
-        from datetime import datetime
-
         updated_at = datetime.now().isoformat(timespec="seconds")
         with sqlite3.connect(self.db_path) as conn:
             conn.executemany(
                 """
                 INSERT INTO stock_basic
-                    (symbol, code, name, status, stock_type, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (
+                        symbol, code, name, status, stock_type,
+                        market, list_date, out_date, updated_at
+                    )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(symbol) DO UPDATE SET
                     code = excluded.code,
                     name = excluded.name,
                     status = excluded.status,
                     stock_type = excluded.stock_type,
+                    market = COALESCE(excluded.market, stock_basic.market),
+                    list_date = COALESCE(excluded.list_date, stock_basic.list_date),
+                    out_date = COALESCE(excluded.out_date, stock_basic.out_date),
                     updated_at = excluded.updated_at
                 """,
                 [
@@ -1143,6 +1253,12 @@ class DataEngine:
                         record["name"],
                         record.get("status", "1"),
                         record.get("stock_type", "1"),
+                        record.get("market") or self._market_from_code(
+                            record.get("code", ""),
+                            record.get("symbol"),
+                        ),
+                        record.get("list_date") or None,
+                        record.get("out_date") or None,
                         updated_at,
                     )
                     for record in records
@@ -1184,6 +1300,420 @@ class DataEngine:
             path.unlink()
             logger.info("已清除失败股票记录")
 
+    # ── 股票画像与板块 ──
+
+    def sync_stock_metadata(self, progress_callback: Callable[..., None] | None = None) -> dict[str, Any]:
+        """同步股票基础画像和行业/概念板块，只保留本地已有行情股票。"""
+        local_symbols = set(self.get_local_symbols())
+        if not local_symbols:
+            return {"local_symbols": 0, "boards": 0, "members": 0}
+
+        def emit(message: str, **kwargs: Any) -> None:
+            if progress_callback is not None:
+                progress_callback(message=message, **kwargs)
+
+        emit("正在同步股票基础资料", total=0, processed=0)
+        basic_records = self.sync_stock_basic()
+        emit("正在同步行业和概念板块", total=2, processed=0)
+
+        board_count = 0
+        member_count = 0
+        for board_type in ("industry", "concept"):
+            boards, members = self._fetch_akshare_boards(board_type, local_symbols, emit)
+            self._write_stock_boards(boards, members, board_type)
+            board_count += len(boards)
+            member_count += len(members)
+            emit(
+                f"{'行业' if board_type == 'industry' else '概念'}板块同步完成",
+                total=2,
+                processed=1 if board_type == "industry" else 2,
+                boards=board_count,
+                members=member_count,
+            )
+
+        self._refresh_stock_basic_board_cache()
+        return {
+            "local_symbols": len(local_symbols),
+            "basic_records": len(basic_records),
+            "boards": board_count,
+            "members": member_count,
+        }
+
+    def _fetch_akshare_boards(
+        self,
+        board_type: str,
+        local_symbols: set[str],
+        emit: Callable[..., None],
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        import akshare as ak
+
+        if board_type == "industry":
+            board_df = ak.stock_board_industry_name_em()
+            member_fetcher = ak.stock_board_industry_cons_em
+        else:
+            board_df = ak.stock_board_concept_name_em()
+            member_fetcher = ak.stock_board_concept_cons_em
+
+        if board_df is None or board_df.empty:
+            return [], []
+
+        boards: list[dict[str, str]] = []
+        members: list[dict[str, str]] = []
+        total = len(board_df)
+        for index, (_, row) in enumerate(board_df.iterrows(), start=1):
+            board_name = _pick_text(row, ["板块名称", "名称", "name"])
+            board_code = _pick_text(row, ["板块代码", "代码", "code"]) or board_name
+            if not board_name:
+                continue
+            emit(
+                f"正在同步{board_name}成分股",
+                total=total,
+                processed=index - 1,
+                current_action="同步板块成分",
+            )
+            boards.append({"board_code": board_code, "board_name": board_name})
+            try:
+                member_df = member_fetcher(symbol=board_name)
+            except TypeError:
+                member_df = member_fetcher(symbol=board_code)
+            except Exception as exc:
+                logger.warning(f"[{board_name}] 板块成分同步失败: {exc}")
+                continue
+            except BaseException:
+                raise
+            if member_df is None or member_df.empty:
+                continue
+            for _, member_row in member_df.iterrows():
+                symbol = _pick_text(member_row, ["代码", "股票代码", "symbol"])
+                if "." in symbol:
+                    symbol = symbol.split(".")[-1]
+                symbol = symbol.zfill(6) if symbol.isdigit() else symbol
+                if symbol in local_symbols:
+                    members.append(
+                        {
+                            "symbol": symbol,
+                            "board_code": board_code,
+                            "board_name": board_name,
+                        }
+                    )
+        return boards, members
+
+    def _write_stock_boards(
+        self,
+        boards: list[dict[str, str]],
+        members: list[dict[str, str]],
+        board_type: str,
+    ) -> None:
+        fetched_at = datetime.now().isoformat(timespec="seconds")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                """
+                INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
+                VALUES (?, ?, ?, 'akshare_em', ?)
+                ON CONFLICT(board_type, board_code) DO UPDATE SET
+                    board_name = excluded.board_name,
+                    source = excluded.source,
+                    fetched_at = excluded.fetched_at
+                """,
+                [
+                    (board["board_code"], board["board_name"], board_type, fetched_at)
+                    for board in boards
+                ],
+            )
+            conn.execute("DELETE FROM stock_board_members WHERE board_type = ?", (board_type,))
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO stock_board_members
+                    (symbol, board_code, board_type, board_name, source, fetched_at)
+                VALUES (?, ?, ?, ?, 'akshare_em', ?)
+                """,
+                [
+                    (
+                        member["symbol"],
+                        member["board_code"],
+                        board_type,
+                        member["board_name"],
+                        fetched_at,
+                    )
+                    for member in members
+                ],
+            )
+            conn.commit()
+
+    def _refresh_stock_basic_board_cache(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            industry_rows = conn.execute(
+                """
+                SELECT symbol, board_code, board_name
+                FROM stock_board_members
+                WHERE board_type = 'industry'
+                ORDER BY symbol, board_name
+                """
+            ).fetchall()
+            concept_rows = conn.execute(
+                """
+                SELECT symbol, board_code, board_name
+                FROM stock_board_members
+                WHERE board_type = 'concept'
+                ORDER BY symbol, board_name
+                """
+            ).fetchall()
+            industry_map = {
+                row["symbol"]: (row["board_code"], row["board_name"])
+                for row in industry_rows
+            }
+            concept_map: dict[str, dict[str, list[str]]] = {}
+            for row in concept_rows:
+                item = concept_map.setdefault(row["symbol"], {"codes": [], "names": []})
+                item["codes"].append(row["board_code"])
+                item["names"].append(row["board_name"])
+
+            updated_at = datetime.now().isoformat(timespec="seconds")
+            for symbol, (board_code, board_name) in industry_map.items():
+                conn.execute(
+                    """
+                    UPDATE stock_basic
+                    SET industry_board_code = ?,
+                        industry_board_name = ?,
+                        board_updated_at = ?
+                    WHERE symbol = ?
+                    """,
+                    (board_code, board_name, updated_at, symbol),
+                )
+            for symbol, concepts in concept_map.items():
+                conn.execute(
+                    """
+                    UPDATE stock_basic
+                    SET concept_board_codes_json = ?,
+                        concept_board_names_json = ?,
+                        board_updated_at = ?
+                    WHERE symbol = ?
+                    """,
+                    (
+                        json.dumps(concepts["codes"], ensure_ascii=False),
+                        json.dumps(concepts["names"], ensure_ascii=False),
+                        updated_at,
+                        symbol,
+                    ),
+                )
+            conn.commit()
+
+    def list_stock_filter_options(self) -> dict[str, list[dict[str, str]]]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            boards = conn.execute(
+                """
+                SELECT board_type, board_code, board_name
+                FROM stock_boards
+                WHERE board_type IN ('industry', 'concept')
+                ORDER BY board_type, board_name
+                """
+            ).fetchall()
+            markets = conn.execute(
+                """
+                SELECT DISTINCT market
+                FROM stock_basic
+                WHERE market IS NOT NULL AND market <> ''
+                ORDER BY market
+                """
+            ).fetchall()
+
+        industries = [
+            {"code": row["board_code"], "name": row["board_name"]}
+            for row in boards
+            if row["board_type"] == "industry"
+        ]
+        concepts = [
+            {"code": row["board_code"], "name": row["board_name"]}
+            for row in boards
+            if row["board_type"] == "concept"
+        ]
+        return {
+            "industries": industries,
+            "concepts": concepts,
+            "markets": [
+                {"value": row["market"], "label": _market_label(row["market"])}
+                for row in markets
+            ],
+        }
+
+    def get_filtered_symbols(
+        self,
+        filters: dict[str, Any] | None = None,
+        reference_date: str | None = None,
+    ) -> list[str]:
+        filters = filters or {}
+        ordered_symbols = self.get_local_symbols()
+        eligible = set(ordered_symbols)
+        if not eligible:
+            return []
+
+        industry_codes = _as_string_list(filters.get("industry_board_codes"))
+        concept_codes = _as_string_list(filters.get("concept_board_codes"))
+        markets = _as_string_list(filters.get("markets"))
+        min_listed_trade_days = int(filters.get("min_listed_trade_days") or 0)
+        min_avg_turnover_20 = float(filters.get("min_avg_turnover_20") or 0)
+        exclude_risks = set(_as_string_list(filters.get("exclude_risks")))
+
+        with sqlite3.connect(self.db_path) as conn:
+            if industry_codes:
+                eligible &= self._symbols_for_boards(conn, "industry", industry_codes)
+            if concept_codes:
+                eligible &= self._symbols_for_boards(conn, "concept", concept_codes)
+            if markets:
+                eligible &= self._symbols_for_markets(conn, markets)
+            if min_listed_trade_days > 0:
+                eligible &= self._symbols_with_min_trading_days(
+                    conn,
+                    min_listed_trade_days,
+                    reference_date,
+                )
+            if min_avg_turnover_20 > 0:
+                eligible &= self._symbols_with_min_avg_turnover(
+                    conn,
+                    min_avg_turnover_20 * 10_000,
+                    reference_date,
+                )
+            if exclude_risks:
+                eligible -= self._symbols_for_excluded_risks(conn, exclude_risks, reference_date)
+
+        return [symbol for symbol in ordered_symbols if symbol in eligible]
+
+    @staticmethod
+    def _symbols_for_boards(
+        conn: sqlite3.Connection,
+        board_type: str,
+        board_codes: list[str],
+    ) -> set[str]:
+        placeholders = ",".join(["?"] * len(board_codes))
+        rows = conn.execute(
+            f"""
+            SELECT DISTINCT symbol
+            FROM stock_board_members
+            WHERE board_type = ? AND board_code IN ({placeholders})
+            """,
+            (board_type, *board_codes),
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    @staticmethod
+    def _symbols_for_markets(conn: sqlite3.Connection, markets: list[str]) -> set[str]:
+        placeholders = ",".join(["?"] * len(markets))
+        rows = conn.execute(
+            f"""
+            SELECT symbol
+            FROM stock_basic
+            WHERE market IN ({placeholders})
+            """,
+            markets,
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    @staticmethod
+    def _symbols_with_min_trading_days(
+        conn: sqlite3.Connection,
+        min_days: int,
+        reference_date: str | None,
+    ) -> set[str]:
+        params: tuple[Any, ...]
+        date_filter = ""
+        if reference_date:
+            date_filter = "WHERE date <= ?"
+            params = (reference_date, min_days)
+        else:
+            params = (min_days,)
+        rows = conn.execute(
+            f"""
+            SELECT symbol
+            FROM stock_daily
+            {date_filter}
+            GROUP BY symbol
+            HAVING COUNT(*) >= ?
+            """,
+            params,
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    @staticmethod
+    def _symbols_with_min_avg_turnover(
+        conn: sqlite3.Connection,
+        min_turnover: float,
+        reference_date: str | None,
+    ) -> set[str]:
+        date_filter = "WHERE date <= ?" if reference_date else ""
+        params: tuple[Any, ...] = (reference_date, min_turnover) if reference_date else (min_turnover,)
+        rows = conn.execute(
+            f"""
+            WITH ranked AS (
+                SELECT
+                    symbol,
+                    turnover,
+                    ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) AS row_number
+                FROM stock_daily
+                {date_filter}
+            ),
+            avg20 AS (
+                SELECT symbol, AVG(turnover) AS avg_turnover
+                FROM ranked
+                WHERE row_number <= 20
+                GROUP BY symbol
+            )
+            SELECT symbol
+            FROM avg20
+            WHERE avg_turnover >= ?
+            """,
+            params,
+        ).fetchall()
+        return {row[0] for row in rows}
+
+    @staticmethod
+    def _symbols_for_excluded_risks(
+        conn: sqlite3.Connection,
+        risks: set[str],
+        reference_date: str | None,
+    ) -> set[str]:
+        excluded: set[str] = set()
+        if "delisted" in risks:
+            rows = conn.execute(
+                """
+                SELECT symbol
+                FROM stock_basic
+                WHERE COALESCE(status, '1') <> '1'
+                   OR (out_date IS NOT NULL AND out_date <> '')
+                """
+            ).fetchall()
+            excluded.update(row[0] for row in rows)
+        if "st" in risks:
+            rows = conn.execute(
+                """
+                SELECT symbol
+                FROM stock_basic
+                WHERE UPPER(COALESCE(name, '')) LIKE '%ST%'
+                """
+            ).fetchall()
+            excluded.update(row[0] for row in rows)
+        if "suspended" in risks:
+            params: tuple[Any, ...] = (reference_date,) if reference_date else ()
+            date_filter = "WHERE date <= ?" if reference_date else ""
+            row = conn.execute(
+                f"SELECT MAX(date) FROM stock_daily {date_filter}",
+                params,
+            ).fetchone()
+            market_latest = row[0] if row else None
+            if market_latest:
+                rows = conn.execute(
+                    """
+                    SELECT symbol
+                    FROM stock_daily
+                    GROUP BY symbol
+                    HAVING MAX(date) < ?
+                    """,
+                    (market_latest,),
+                ).fetchall()
+                excluded.update(row[0] for row in rows)
+        return excluded
+
     def _bs_fetch_stock_list(self) -> list[dict[str, str]]:
         """Baostock 获取全市场 A 股列表。"""
         import baostock as bs
@@ -1202,6 +1732,8 @@ class DataEngine:
                 data = dict(zip(fields, row))
                 code = data.get("code") or (row[0] if len(row) > 0 else "")
                 name = data.get("code_name") or (row[1] if len(row) > 1 else "")
+                list_date = data.get("ipoDate") or (row[2] if len(row) > 2 else "")
+                out_date = data.get("outDate") or (row[3] if len(row) > 3 else "")
                 stock_type = data.get("type") or (row[4] if len(row) > 4 else "")
                 status = data.get("status") or (row[5] if len(row) > 5 else "")
                 if not code or "." not in code:
@@ -1219,6 +1751,9 @@ class DataEngine:
                         "name": name or symbol,
                         "status": status,
                         "stock_type": stock_type,
+                        "market": self._market_from_code(code, symbol),
+                        "list_date": _normalize_date_text(list_date),
+                        "out_date": _normalize_date_text(out_date),
                     }
                 )
 
@@ -1231,10 +1766,13 @@ class DataEngine:
             bs.logout()
 
     def get_local_symbols(self) -> list[str]:
-        with sqlite3.connect(self.db_path) as conn:
+        conn = sqlite3.connect(self.db_path)
+        try:
             rows = conn.execute(
                 "SELECT DISTINCT symbol FROM stock_daily"
             ).fetchall()
+        finally:
+            conn.close()
         return [row[0] for row in rows]
 
     def list_local_stocks(
@@ -1319,12 +1857,24 @@ class DataEngine:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def get_stock_summary(self, symbol: str) -> dict[str, object] | None:
+    def get_stock_summary(
+        self,
+        symbol: str,
+        end_date: str | None = None,
+    ) -> dict[str, object] | None:
         """Return local stock name, coverage, and latest quote for one symbol."""
-        with sqlite3.connect(self.db_path) as conn:
+        conn = sqlite3.connect(self.db_path)
+        try:
             conn.row_factory = sqlite3.Row
+            params: tuple[object, ...]
+            date_filter = ""
+            if end_date:
+                date_filter = "AND date <= ?"
+                params = (symbol, end_date)
+            else:
+                params = (symbol,)
             row = conn.execute(
-                """
+                f"""
                 WITH coverage AS (
                     SELECT
                         symbol,
@@ -1333,6 +1883,7 @@ class DataEngine:
                         MAX(date) AS latest_date
                     FROM stock_daily
                     WHERE symbol = ?
+                    {date_filter}
                     GROUP BY symbol
                 )
                 SELECT
@@ -1354,8 +1905,10 @@ class DataEngine:
                   ON sd.symbol = c.symbol
                  AND sd.date = c.latest_date
                 """,
-                (symbol,),
+                params,
             ).fetchone()
+        finally:
+            conn.close()
         return dict(row) if row else None
 
     def get_ohlcv_series(
@@ -1442,3 +1995,53 @@ def _clean_float(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _normalize_date_text(value: object) -> str:
+    text = str(value or "").strip()
+    if not text or text in {"None", "nan", "NaT"}:
+        return ""
+    return _format_compact_date(text)
+
+
+def _format_compact_date(value: object) -> str:
+    text = str(value or "").strip()
+    if not text or text in {"None", "nan", "NaT"}:
+        return ""
+    if len(text) == 8 and text.isdigit():
+        return f"{text[0:4]}-{text[4:6]}-{text[6:8]}"
+    return text
+
+
+def _pick_text(row: Any, candidates: list[str]) -> str:
+    for key in candidates:
+        try:
+            value = row.get(key)
+        except AttributeError:
+            value = None
+        if value is not None and not pd.isna(value):
+            text = str(value).strip()
+            if text:
+                return text
+    return ""
+
+
+def _market_label(market: str) -> str:
+    return {
+        "SH": "上海",
+        "SZ": "深圳",
+        "BJ": "北京",
+    }.get(market, market)
+
+
+def _as_string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        values = [value]
+    else:
+        try:
+            values = list(value)
+        except TypeError:
+            values = [value]
+    return [str(item).strip() for item in values if str(item).strip()]

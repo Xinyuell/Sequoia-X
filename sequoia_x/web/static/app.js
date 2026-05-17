@@ -12,9 +12,12 @@ const state = {
   resultSeries: [],
   resultSeriesStock: null,
   resultWindowSize: 120,
+  stockFilterOptions: { industries: [], concepts: [], markets: [] },
 };
 
 const numberFormatter = new Intl.NumberFormat("zh-CN");
+const chartHoverData = new Map();
+let chartTooltipEl = null;
 const PERIOD_LABELS = {
   day: "日K",
   week: "周K",
@@ -53,6 +56,7 @@ function bindTabs() {
 function bindActions() {
   byId("refreshDataBtn").addEventListener("click", loadDataSummary);
   byId("syncBtn").addEventListener("click", () => startDataJob("/api/data/sync"));
+  byId("metadataSyncBtn").addEventListener("click", () => startDataJob("/api/data/metadata"));
   byId("backfillBtn").addEventListener("click", startBackfillJob);
   byId("reloadStocksBtn").addEventListener("click", () => loadStocks());
   byId("stockSearch").addEventListener("input", () => {
@@ -78,7 +82,7 @@ function bindActions() {
 
 async function loadInitialData() {
   byId("referenceDate").value = new Date().toISOString().slice(0, 10);
-  await Promise.all([loadDataSummary(), loadStrategies(), loadStocks()]);
+  await Promise.all([loadDataSummary(), loadStrategies(), loadStocks(), loadStockFilterOptions()]);
 }
 
 function startBackfillJob() {
@@ -179,6 +183,7 @@ async function pollJob(jobId) {
     setDataButtonsDisabled(false);
     await loadDataSummary();
     await loadStocks();
+    await loadStockFilterOptions();
   } catch (error) {
     renderJobError(error.message);
     setDataButtonsDisabled(false);
@@ -269,6 +274,7 @@ function renderEmptyChart(message, target = {}) {
   byId(metaId).textContent = message;
   const canvas = byId(canvasId);
   const ctx = setupCanvas(canvas);
+  setKlineHoverData(canvas, [], null);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = "#65717d";
   ctx.font = "14px sans-serif";
@@ -346,6 +352,11 @@ function renderKlineChart(rows, stock, target = {}) {
   if (stock) {
     byId(titleId).textContent = `${stock.name || stock.symbol} ${stock.symbol}`;
   }
+  setKlineHoverData(canvas, rows, {
+    padding,
+    chartWidth,
+    candleStep,
+  });
 }
 
 function drawGrid(ctx, padding, chartWidth, chartHeight, minPrice, maxPrice) {
@@ -361,6 +372,102 @@ function drawGrid(ctx, padding, chartWidth, chartHeight, minPrice, maxPrice) {
     ctx.lineTo(padding.left + chartWidth, y);
     ctx.stroke();
     ctx.fillText(price.toFixed(2), 8, y + 4);
+  }
+}
+
+function setKlineHoverData(canvas, rows, layout) {
+  chartHoverData.set(canvas.id, { rows, layout });
+  if (canvas.dataset.klineHoverBound === "1") {
+    return;
+  }
+  canvas.dataset.klineHoverBound = "1";
+  canvas.addEventListener("mousemove", handleKlineHover);
+  canvas.addEventListener("mouseleave", hideKlineTooltip);
+}
+
+function handleKlineHover(event) {
+  const canvas = event.currentTarget;
+  const hover = chartHoverData.get(canvas.id);
+  if (!hover?.rows?.length || !hover.layout) {
+    hideKlineTooltip();
+    return;
+  }
+
+  const { rows, layout } = hover;
+  const rect = canvas.getBoundingClientRect();
+  const x = (event.clientX - rect.left) * (canvas.width / rect.width);
+  const minX = layout.padding.left;
+  const maxX = layout.padding.left + layout.chartWidth;
+  if (x < minX || x > maxX) {
+    hideKlineTooltip();
+    return;
+  }
+
+  const index = Math.round((x - layout.padding.left - layout.candleStep / 2) / layout.candleStep);
+  if (index < 0 || index >= rows.length) {
+    hideKlineTooltip();
+    return;
+  }
+
+  const centerX = layout.padding.left + index * layout.candleStep + layout.candleStep / 2;
+  if (Math.abs(x - centerX) > Math.max(8, layout.candleStep / 2)) {
+    hideKlineTooltip();
+    return;
+  }
+
+  showKlineTooltip(event, rows[index], rows[index - 1]);
+}
+
+function showKlineTooltip(event, row, previousRow) {
+  const tooltip = getKlineTooltip();
+  const open = Number(row.open);
+  const high = Number(row.high);
+  const low = Number(row.low);
+  const close = Number(row.close);
+  const previousClose = Number(previousRow?.close);
+  const change = Number.isFinite(close) && Number.isFinite(previousClose) ? close - previousClose : null;
+  const changePct = change !== null && previousClose !== 0 ? change / previousClose * 100 : null;
+  const changeClass = change === null ? "return-flat" : change >= 0 ? "return-positive" : "return-negative";
+  tooltip.innerHTML = `
+    <div class="chart-tooltip-title">时间　${escapeHtml(row.date || "--")}</div>
+    <div class="chart-tooltip-row"><span>开盘</span><strong>${escapeHtml(formatMaybeNumber(open))}</strong></div>
+    <div class="chart-tooltip-row"><span>收盘</span><strong>${escapeHtml(formatMaybeNumber(close))}</strong></div>
+    <div class="chart-tooltip-row"><span>最高</span><strong>${escapeHtml(formatMaybeNumber(high))}</strong></div>
+    <div class="chart-tooltip-row"><span>最低</span><strong>${escapeHtml(formatMaybeNumber(low))}</strong></div>
+    <div class="chart-tooltip-row"><span>涨跌额</span><strong class="${changeClass}">${escapeHtml(formatSignedNumber(change))}</strong></div>
+    <div class="chart-tooltip-row"><span>涨跌幅</span><strong class="${changeClass}">${escapeHtml(formatSignedPercent(changePct))}</strong></div>
+    <div class="chart-tooltip-row"><span>成交量</span><strong>${escapeHtml(formatNumber(row.volume))}</strong></div>
+    <div class="chart-tooltip-row"><span>成交额</span><strong>${escapeHtml(formatMaybeNumber(row.turnover))}</strong></div>
+  `;
+  tooltip.style.display = "block";
+
+  const margin = 14;
+  const width = tooltip.offsetWidth;
+  const height = tooltip.offsetHeight;
+  let left = event.clientX + margin;
+  let top = event.clientY + margin;
+  if (left + width > window.innerWidth - margin) {
+    left = event.clientX - width - margin;
+  }
+  if (top + height > window.innerHeight - margin) {
+    top = event.clientY - height - margin;
+  }
+  tooltip.style.left = `${Math.max(margin, left)}px`;
+  tooltip.style.top = `${Math.max(margin, top)}px`;
+}
+
+function getKlineTooltip() {
+  if (!chartTooltipEl) {
+    chartTooltipEl = document.createElement("div");
+    chartTooltipEl.className = "chart-tooltip";
+    document.body.appendChild(chartTooltipEl);
+  }
+  return chartTooltipEl;
+}
+
+function hideKlineTooltip() {
+  if (chartTooltipEl) {
+    chartTooltipEl.style.display = "none";
   }
 }
 
@@ -429,6 +536,7 @@ function renderJobError(message) {
 
 function setDataButtonsDisabled(disabled) {
   byId("syncBtn").disabled = disabled;
+  byId("metadataSyncBtn").disabled = disabled;
   byId("backfillBtn").disabled = disabled;
   byId("backfillStartDate").disabled = disabled;
   byId("backfillSource").disabled = disabled;
@@ -448,6 +556,34 @@ async function loadStrategies() {
   } catch (error) {
     showStrategyMessage(`策略读取失败：${error.message}`, "error");
   }
+}
+
+async function loadStockFilterOptions() {
+  try {
+    state.stockFilterOptions = await api("/api/stock-filters");
+    renderStockFilters();
+  } catch (error) {
+    state.stockFilterOptions = { industries: [], concepts: [], markets: [] };
+    renderStockFilters();
+  }
+}
+
+function renderStockFilters() {
+  renderOptionSelect("industryFilter", state.stockFilterOptions.industries || [], "code", "name");
+  renderOptionSelect("conceptFilter", state.stockFilterOptions.concepts || [], "code", "name");
+  renderOptionSelect("marketFilter", state.stockFilterOptions.markets || [], "value", "label");
+}
+
+function renderOptionSelect(id, options, valueKey, labelKey) {
+  const select = byId(id);
+  const selected = new Set(Array.from(select.selectedOptions || []).map((option) => option.value));
+  select.innerHTML = options
+    .map((option) => {
+      const value = String(option[valueKey] || "");
+      const selectedText = selected.has(value) ? "selected" : "";
+      return `<option value="${escapeHtml(value)}" ${selectedText}>${escapeHtml(option[labelKey] || value)}</option>`;
+    })
+    .join("");
 }
 
 function selectStrategy(key) {
@@ -537,8 +673,10 @@ async function runSelectedStrategy() {
 
   try {
     const parameters = collectParameters();
+    const backtestDays = collectBacktestDays();
+    const filters = collectStockFilters();
     const referenceDate = byId("referenceDate").value || null;
-    const body = { parameters };
+    const body = { parameters, backtest_days: backtestDays, filters };
     if (referenceDate) {
       body.reference_date = referenceDate;
     }
@@ -626,6 +764,68 @@ function collectParameters() {
   return parameters;
 }
 
+function collectBacktestDays() {
+  const text = byId("backtestDays").value.trim();
+  const parts = text ? text.split(/[,\s，、]+/).filter(Boolean) : ["1", "3", "5"];
+  const days = [];
+  parts.forEach((part) => {
+    const day = Number.parseInt(part, 10);
+    if (!Number.isInteger(day) || day <= 0 || day > 120) {
+      throw new Error("回测交易日必须是 1 到 120 之间的整数");
+    }
+    if (!days.includes(day)) {
+      days.push(day);
+    }
+  });
+  if (days.length === 0) {
+    throw new Error("请至少填写一个回测交易日");
+  }
+  if (days.length > 8) {
+    throw new Error("回测交易日最多填写 8 个");
+  }
+  return days;
+}
+
+function collectStockFilters() {
+  return {
+    industry_board_codes: selectedValues("industryFilter"),
+    concept_board_codes: selectedValues("conceptFilter"),
+    markets: selectedValues("marketFilter"),
+    min_listed_trade_days: readNonNegativeInteger("minListedDays"),
+    min_avg_turnover_20: readNonNegativeNumber("minAvgTurnover20"),
+    exclude_risks: Array.from(document.querySelectorAll("[data-risk-filter]:checked"))
+      .map((input) => input.dataset.riskFilter),
+  };
+}
+
+function selectedValues(id) {
+  return Array.from(byId(id).selectedOptions).map((option) => option.value).filter(Boolean);
+}
+
+function readNonNegativeInteger(id) {
+  const value = byId(id).value.trim();
+  if (!value) {
+    return 0;
+  }
+  const numeric = Number.parseInt(value, 10);
+  if (!Number.isInteger(numeric) || numeric < 0) {
+    throw new Error("上市满交易日必须是不小于 0 的整数");
+  }
+  return numeric;
+}
+
+function readNonNegativeNumber(id) {
+  const value = byId(id).value.trim();
+  if (!value) {
+    return 0;
+  }
+  const numeric = Number.parseFloat(value);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    throw new Error("20日均成交额必须是不小于 0 的数字");
+  }
+  return numeric;
+}
+
 function renderResults(result) {
   byId("resultCount").textContent = `${formatNumber(result.total)} 只`;
   const strategy = state.strategies.find((item) => item.key === result.strategy_key);
@@ -633,16 +833,21 @@ function renderResults(result) {
   const parameterText = Object.entries(result.parameters || {})
     .map(([key, value]) => `${parameterLabels[key] || metricLabel(key)}=${formatParameterValue(key, value)}`)
     .join("，");
-  byId("resultMeta").textContent = parameterText
-    ? `${result.strategy_name}；${parameterText}`
-    : result.strategy_name;
+  const referenceText = result.reference_date ? `参考日期=${result.reference_date}` : "";
+  const filterText = result.filter_summary
+    ? `筛选后股票池=${formatNumber(result.filter_summary.eligible_symbols)}只`
+    : "";
+  byId("resultMeta").textContent = [result.strategy_name, referenceText, parameterText, filterText]
+    .filter(Boolean)
+    .join("；");
+  renderBacktestSummary(result.backtest);
 
   const rows = result.rows || [];
-  renderResultHeader(result.strategy_key);
+  renderResultHeader(result);
   if (rows.length === 0) {
     byId("resultRows").innerHTML = `
       <tr>
-        <td colspan="${resultColumnCount(result.strategy_key)}" class="muted">没有符合条件的股票</td>
+        <td colspan="${resultColumnCount(result)}" class="muted">没有符合条件的股票</td>
       </tr>
     `;
     resetResultDetail();
@@ -657,17 +862,47 @@ function renderResults(result) {
   selectResultStock(state.selectedResultSymbol, { keepPeriod: true, skipRender: true });
 }
 
-function renderResultHeader(strategyKey) {
-  const headers = strategyKey === "sideways_consolidation"
+function renderBacktestSummary(backtest) {
+  const panel = byId("resultBacktestSummary");
+  const summary = backtest?.summary || [];
+  if (!summary.length) {
+    panel.className = "backtest-summary muted";
+    panel.innerHTML = "";
+    return;
+  }
+  panel.className = "backtest-summary";
+  panel.innerHTML = summary
+    .map((item) => `
+      <div class="backtest-chip">
+        <strong>+${escapeHtml(item.days)}日</strong>
+        <span>${escapeHtml(formatNumber(item.evaluated))}只股票</span>
+        <span>平均涨跌幅:${escapeHtml(formatSignedPercent(item.average_pct))}；</span>
+        <span>涨幅大于1%，共${escapeHtml(formatNumber(item.up_gt_1))}(${escapeHtml(formatPercent(item.up_gt_1_ratio))})</span>
+        <span>跌幅大于-1%，共${escapeHtml(formatNumber(item.down_gt_1))}(${escapeHtml(formatPercent(item.down_gt_1_ratio))})</span>
+        <span>-1%~1%之间，共 ${escapeHtml(formatNumber(item.flat_between_1))}(${escapeHtml(formatPercent(item.flat_between_1_ratio))}</span>
+        <span>涨幅超过10%，共${escapeHtml(formatNumber(item.up_gt_10))}(${escapeHtml(formatPercent(item.up_gt_10_ratio))})</span>
+        <span>跌幅超过10%，共${escapeHtml(formatNumber(item.down_gt_10))}(${escapeHtml(formatPercent(item.down_gt_10_ratio))})</span>
+      </div>
+    `)
+    .join("");
+}
+
+function renderResultHeader(result) {
+  const headers = result.strategy_key === "sideways_consolidation"
     ? ["名称", "代码", "最新日期", "收盘价", "区间振幅", "距区间高点"]
     : ["名称", "代码", "最新日期", "收盘价", "策略", "指标"];
-  byId("resultHeadRow").innerHTML = headers
+  const backtestHeaders = backtestHorizons(result).map((day) => `+${day}日涨跌`);
+  byId("resultHeadRow").innerHTML = [...headers, ...backtestHeaders]
     .map((header) => `<th>${escapeHtml(header)}</th>`)
     .join("");
 }
 
-function resultColumnCount(strategyKey) {
-  return strategyKey === "sideways_consolidation" ? 6 : 6;
+function resultColumnCount(result) {
+  return 6 + backtestHorizons(result).length;
+}
+
+function backtestHorizons(result) {
+  return result?.backtest?.horizons || [];
 }
 
 function renderResultRows() {
@@ -676,7 +911,7 @@ function renderResultRows() {
   if (!result || rows.length === 0) {
     return;
   }
-  const columnCount = resultColumnCount(result.strategy_key);
+  const columnCount = resultColumnCount(result);
   byId("resultRows").innerHTML = rows
     .map((row) => renderResultRow(row, result, columnCount))
     .join("");
@@ -687,9 +922,10 @@ function renderResultRows() {
 
 function renderResultRow(row, result, columnCount) {
   const selected = row.symbol === state.selectedResultSymbol;
-  const cells = result.strategy_key === "sideways_consolidation"
+  const baseCells = result.strategy_key === "sideways_consolidation"
     ? renderSidewaysResultCells(row)
     : renderDefaultResultCells(row, result.strategy_name);
+  const cells = `${baseCells}${renderBacktestReturnCells(row, result)}`;
   const detail = selected
     ? `<tr class="result-detail-row"><td colspan="${columnCount}">${resultDetailPanelHtml()}</td></tr>`
     : "";
@@ -728,6 +964,24 @@ function renderSidewaysResultCells(row) {
     <td>${escapeHtml(formatMetricValue("amplitude_pct", metrics.amplitude_pct))}</td>
     <td>${escapeHtml(formatMetricValue("distance_to_high_pct", metrics.distance_to_high_pct))}</td>
   `;
+}
+
+function renderBacktestReturnCells(row, result) {
+  const returns = row.backtest_returns || {};
+  return backtestHorizons(result)
+    .map((day) => {
+      const value = returns[String(day)];
+      return `<td class="${backtestReturnClass(value)}">${escapeHtml(formatSignedPercent(value))}</td>`;
+    })
+    .join("");
+}
+
+function backtestReturnClass(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric === 0) {
+    return "return-flat";
+  }
+  return numeric > 0 ? "return-positive" : "return-negative";
 }
 
 function resultDetailPanelHtml() {
@@ -969,6 +1223,7 @@ function jobKindLabel(kind) {
   return {
     backfill: "历史 K 线更新",
     sync: "每日增量更新",
+    metadata: "股票画像同步",
   }[kind] || kind || "--";
 }
 
@@ -992,6 +1247,10 @@ function formatJobResult(result) {
     failed: "失败",
     rows_written: "写入行数",
     row_count: "写入行数",
+    local_symbols: "本地股票",
+    basic_records: "基础资料",
+    boards: "板块数",
+    members: "成分关系",
     start_date: "起始日期",
     end_date: "结束日期",
     full_refresh: "强制重拉",
@@ -1009,6 +1268,27 @@ function formatNumber(value) {
 function formatMaybeNumber(value) {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numberFormatter.format(numeric) : String(value ?? "--");
+}
+
+function formatPercent(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? `${numeric.toFixed(2)}%` : "--";
+}
+
+function formatSignedPercent(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "--";
+  }
+  return `${numeric > 0 ? "+" : ""}${numeric.toFixed(2)}%`;
+}
+
+function formatSignedNumber(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return "--";
+  }
+  return `${numeric > 0 ? "+" : ""}${numeric.toFixed(3)}`;
 }
 
 function escapeHtml(value) {

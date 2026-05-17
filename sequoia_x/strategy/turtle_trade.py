@@ -33,7 +33,7 @@ class TurtleTradeStrategy(BaseStrategy):
 
         import baostock as bs
 
-        today_str = date.today().strftime("%Y-%m-%d")
+        today_str = self.reference_date or date.today().strftime("%Y-%m-%d")
         market_caps: dict[str, float] = {}
 
         bs.login()
@@ -73,7 +73,7 @@ class TurtleTradeStrategy(BaseStrategy):
 
         for symbol in symbols:
             try:
-                df = self.engine.get_ohlcv(symbol)
+                df = self.engine.get_ohlcv(symbol, end_date=self.reference_date)
                 if len(df) < self._MIN_BARS:
                     continue
 

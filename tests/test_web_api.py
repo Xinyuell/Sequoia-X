@@ -141,6 +141,239 @@ def test_api_runs_strategy_as_progress_job(tmp_path) -> None:
     assert job["progress"]["matched"] == 1
 
 
+def test_api_applies_reference_date_to_non_sideways_strategy(tmp_path) -> None:
+    settings = Settings(
+        db_path=str(tmp_path / "reference.db"),
+        start_date="2024-01-01",
+        feishu_webhook_url="https://example.com/hook",
+    )
+    engine = DataEngine(settings)
+    rows = []
+    start = date(2026, 1, 1)
+    for offset in range(22):
+        close = 10.0
+        volume = 1000.0
+        if offset == 19:
+            close = 9.0
+        elif offset == 20:
+            close = 20.0
+            volume = 3000.0
+        elif offset == 21:
+            close = 5.0
+        rows.append(
+            {
+                "date": str(start + timedelta(days=offset)),
+                "open": close,
+                "high": close,
+                "low": close,
+                "close": close,
+                "volume": volume,
+                "turnover": volume * close,
+            }
+        )
+    insert_rows(engine, "000001", rows)
+    app = create_app(settings=settings, engine=engine, jobs=InMemoryJobManager(run_async=False))
+    client = TestClient(app)
+
+    historical = client.post(
+        "/api/strategies/ma_volume/run",
+        json={"parameters": {}, "reference_date": "2026-01-21", "backtest_days": [1]},
+    )
+    latest = client.post(
+        "/api/strategies/ma_volume/run",
+        json={"parameters": {}, "backtest_days": [1]},
+    )
+
+    assert historical.status_code == 200
+    assert historical.json()["rows"][0]["symbol"] == "000001"
+    assert historical.json()["rows"][0]["latest_date"] == "2026-01-21"
+    assert latest.status_code == 200
+    assert latest.json()["total"] == 0
+
+
+def test_api_adds_backtest_returns_and_summary(tmp_path) -> None:
+    settings = Settings(
+        db_path=str(tmp_path / "backtest.db"),
+        start_date="2024-01-01",
+        feishu_webhook_url="https://example.com/hook",
+    )
+    engine = DataEngine(settings)
+    start = date(2026, 1, 1)
+    closes = [10.9] * 20 + [11.2, 10.9, 10.75, 12.1, 9.7]
+    rows = []
+    for offset, close in enumerate(closes):
+        rows.append(
+            {
+                "date": str(start + timedelta(days=offset)),
+                "open": close,
+                "high": 11.0 if offset < 20 else close,
+                "low": 10.0 if offset < 20 else close,
+                "close": close,
+                "volume": 1000.0,
+                "turnover": 10000.0,
+            }
+        )
+    insert_rows(engine, "000001", rows)
+    app = create_app(settings=settings, engine=engine, jobs=InMemoryJobManager(run_async=False))
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/strategies/sideways_consolidation/run",
+        json={
+            "reference_date": "2026-01-20",
+            "backtest_days": [1, 3, 5],
+            "parameters": {
+                "lookback_days": 20,
+                "max_amplitude_pct": 12,
+                "min_distance_pct": 0,
+                "max_distance_pct": 3,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["backtest"]["horizons"] == [1, 3, 5]
+    returns = payload["rows"][0]["backtest_returns"]
+    assert returns["1"] > 1
+    assert returns["3"] < -1
+    assert returns["5"] < -10
+    summary_by_day = {item["days"]: item for item in payload["backtest"]["summary"]}
+    assert summary_by_day[1]["up_gt_1"] == 1
+    assert summary_by_day[3]["down_gt_1"] == 1
+    assert summary_by_day[5]["down_gt_10"] == 1
+
+
+def test_api_lists_stock_filter_options(tmp_path) -> None:
+    client = make_app(tmp_path)
+    engine = client.app.state.engine
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.execute("UPDATE stock_basic SET market = 'SZ', list_date = '1991-04-03'")
+        conn.execute(
+            """
+            INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
+            VALUES ('IND001', '银行', 'industry', 'test', '2026-05-17T00:00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
+            VALUES ('CON001', '大金融', 'concept', 'test', '2026-05-17T00:00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_board_members(symbol, board_code, board_type, board_name, source, fetched_at)
+            VALUES ('000001', 'IND001', 'industry', '银行', 'test', '2026-05-17T00:00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_board_members(symbol, board_code, board_type, board_name, source, fetched_at)
+            VALUES ('000001', 'CON001', 'concept', '大金融', 'test', '2026-05-17T00:00:00')
+            """
+        )
+        conn.commit()
+
+    response = client.get("/api/stock-filters")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["industries"] == [{"code": "IND001", "name": "银行"}]
+    assert payload["concepts"] == [{"code": "CON001", "name": "大金融"}]
+    assert {"value": "SZ", "label": "深圳"} in payload["markets"]
+
+
+def test_api_applies_strategy_stock_filters(tmp_path) -> None:
+    settings = Settings(
+        db_path=str(tmp_path / "filters.db"),
+        start_date="2024-01-01",
+        feishu_webhook_url="https://example.com/hook",
+    )
+    engine = DataEngine(settings)
+    insert_rows(engine, "000001", make_rows(days=25, high=11.0, low=10.0, latest_close=10.9))
+    insert_rows(engine, "000002", make_rows(days=25, high=11.0, low=10.0, latest_close=10.9))
+    insert_rows(engine, "000003", make_rows(days=25, high=11.0, low=10.0, latest_close=10.9))
+    insert_rows(engine, "000004", make_rows(days=25, high=11.0, low=10.0, latest_close=10.9))
+    insert_rows(engine, "000005", make_rows(days=10, high=11.0, low=10.0, latest_close=10.9))
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO stock_basic(
+                symbol, code, name, status, stock_type, market, list_date, updated_at
+            )
+            VALUES (?, ?, ?, ?, '1', ?, ?, '2026-05-17T00:00:00')
+            """,
+            [
+                ("000001", "sz.000001", "平安银行", "1", "SZ", "1991-04-03"),
+                ("000002", "sh.000002", "上海样本", "1", "SH", "1991-04-03"),
+                ("000003", "sz.000003", "*ST 风险", "1", "SZ", "1991-04-03"),
+                ("000004", "sz.000004", "低流动性", "1", "SZ", "1991-04-03"),
+                ("000005", "sz.000005", "新股样本", "1", "SZ", "2026-01-10"),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
+            VALUES (?, ?, ?, 'test', '2026-05-17T00:00:00')
+            """,
+            [
+                ("IND001", "银行", "industry"),
+                ("IND002", "地产", "industry"),
+                ("CON001", "大金融", "concept"),
+                ("CON002", "低价股", "concept"),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO stock_board_members(symbol, board_code, board_type, board_name, source, fetched_at)
+            VALUES (?, ?, ?, ?, 'test', '2026-05-17T00:00:00')
+            """,
+            [
+                ("000001", "IND001", "industry", "银行"),
+                ("000002", "IND001", "industry", "银行"),
+                ("000003", "IND001", "industry", "银行"),
+                ("000004", "IND001", "industry", "银行"),
+                ("000005", "IND001", "industry", "银行"),
+                ("000001", "CON001", "concept", "大金融"),
+                ("000002", "CON001", "concept", "大金融"),
+                ("000003", "CON001", "concept", "大金融"),
+                ("000004", "CON001", "concept", "大金融"),
+                ("000005", "CON001", "concept", "大金融"),
+            ],
+        )
+        conn.execute("UPDATE stock_daily SET turnover = 200000000 WHERE symbol <> '000004'")
+        conn.execute("UPDATE stock_daily SET turnover = 50000000 WHERE symbol = '000004'")
+        conn.commit()
+    app = create_app(settings=settings, engine=engine, jobs=InMemoryJobManager(run_async=False))
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/strategies/sideways_consolidation/run",
+        json={
+            "filters": {
+                "industry_board_codes": ["IND001"],
+                "concept_board_codes": ["CON001"],
+                "markets": ["SZ"],
+                "min_listed_trade_days": 20,
+                "min_avg_turnover_20": 10000,
+                "exclude_risks": ["st"],
+            },
+            "parameters": {
+                "lookback_days": 5,
+                "max_amplitude_pct": 12,
+                "min_distance_pct": 0,
+                "max_distance_pct": 3,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["filter_summary"]["eligible_symbols"] == 1
+    assert [row["symbol"] for row in payload["rows"]] == ["000001"]
+
+
 def test_api_rejects_invalid_strategy_parameters(tmp_path) -> None:
     client = make_app(tmp_path)
 

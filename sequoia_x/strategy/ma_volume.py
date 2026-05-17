@@ -33,7 +33,7 @@ class MaVolumeStrategy(BaseStrategy):
 
         for symbol in symbols:
             try:
-                df = self.engine.get_ohlcv(symbol)
+                df = self.engine.get_ohlcv(symbol, end_date=self.reference_date)
                 if len(df) < 20:
                     continue
 

@@ -4,6 +4,7 @@ import sqlite3
 from datetime import date
 from inspect import Parameter, signature
 from pathlib import Path
+from statistics import median
 from typing import Any, Literal
 
 import pandas as pd
@@ -23,6 +24,8 @@ from sequoia_x.web.jobs import InMemoryJobManager, JobAlreadyRunningError, JobNo
 class StrategyRunRequest(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     reference_date: date | None = None
+    backtest_days: list[int] = Field(default_factory=lambda: [1, 3, 5])
+    filters: dict[str, Any] = Field(default_factory=dict)
 
 
 class BackfillRequest(BaseModel):
@@ -67,6 +70,22 @@ def create_api_router() -> APIRouter:
             "stock": stock,
             "rows": rows,
         }
+
+    @router.get("/stock-filters")
+    def stock_filters(request: Request) -> dict[str, Any]:
+        return _engine(request).list_stock_filter_options()
+
+    @router.post("/data/metadata")
+    def start_metadata_sync(request: Request) -> dict[str, str]:
+        engine = _engine(request)
+
+        def work(progress: Any) -> dict[str, Any]:
+            progress(message="正在同步股票行业、概念和基础资料")
+            result = engine.sync_stock_metadata(progress_callback=progress)
+            progress(message="股票行业、概念和基础资料同步完成", **result)
+            return result
+
+        return _start_job(request, "metadata", "股票画像同步已排队", work)
 
     @router.post("/data/backfill")
     def start_backfill(request: Request, payload: BackfillRequest | None = None) -> dict[str, str]:
@@ -184,45 +203,71 @@ def _run_strategy(
     payload: StrategyRunRequest,
     progress_callback: Any | None = None,
 ) -> dict[str, Any]:
-        try:
-            definition = get_strategy_definition(strategy_key)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=f"Unknown strategy: {strategy_key}") from exc
+    engine = _engine(request)
+    reference_date = payload.reference_date.isoformat() if payload.reference_date else None
+    eligible_symbols = engine.get_filtered_symbols(payload.filters, reference_date=reference_date)
+    strategy_engine = _FilteredEngine(engine, eligible_symbols)
+    try:
+        definition = get_strategy_definition(strategy_key)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown strategy: {strategy_key}") from exc
 
-        try:
-            strategy, parameters = definition.create(
-                engine=_engine(request),
-                settings=request.app.state.settings,
-                raw_parameters=payload.parameters,
-                reference_date=payload.reference_date.isoformat() if payload.reference_date else None,
-            )
-        except ParameterValidationError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        strategy, parameters = definition.create(
+            engine=strategy_engine,
+            settings=request.app.state.settings,
+            raw_parameters=payload.parameters,
+            reference_date=reference_date,
+        )
+    except ParameterValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-        if hasattr(strategy, "run_with_details"):
-            if progress_callback is not None and _accepts_keyword(strategy.run_with_details, "progress_callback"):
-                detail_rows = strategy.run_with_details(progress_callback=progress_callback)
-            else:
-                detail_rows = strategy.run_with_details()
+    if hasattr(strategy, "run_with_details"):
+        if progress_callback is not None and _accepts_keyword(strategy.run_with_details, "progress_callback"):
+            detail_rows = strategy.run_with_details(progress_callback=progress_callback)
         else:
-            detail_rows = [
-                _symbol_to_result_row(_engine(request), symbol)
-                for symbol in strategy.run()
-            ]
-
-        rows = [
-            row.to_dict() if isinstance(row, StrategyResultRow) else row
-            for row in detail_rows
+            detail_rows = strategy.run_with_details()
+    else:
+        detail_rows = [
+            _symbol_to_result_row(engine, symbol, end_date=reference_date)
+            for symbol in strategy.run()
         ]
-        rows = [_with_stock_summary(_engine(request), row) for row in rows]
 
-        return {
-            "strategy_key": definition.key,
-            "strategy_name": definition.name,
-            "parameters": parameters,
-            "total": len(rows),
-            "rows": rows,
-        }
+    rows = [
+        row.to_dict() if isinstance(row, StrategyResultRow) else row
+        for row in detail_rows
+    ]
+    eligible_set = set(eligible_symbols)
+    rows = [row for row in rows if row.get("symbol") in eligible_set]
+    rows = [_with_stock_summary(engine, row) for row in rows]
+    backtest_days = _normalize_backtest_days(payload.backtest_days)
+    backtest = _attach_backtest_returns(engine, rows, backtest_days)
+
+    return {
+        "strategy_key": definition.key,
+        "strategy_name": definition.name,
+        "parameters": parameters,
+        "reference_date": reference_date,
+        "filter_summary": {
+            "eligible_symbols": len(eligible_symbols),
+            "filters": payload.filters,
+        },
+        "backtest": backtest,
+        "total": len(rows),
+        "rows": rows,
+    }
+
+
+class _FilteredEngine:
+    def __init__(self, engine: DataEngine, symbols: list[str]) -> None:
+        self._engine = engine
+        self._symbols = symbols
+
+    def get_local_symbols(self) -> list[str]:
+        return list(self._symbols)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._engine, name)
 
 
 def _accepts_keyword(func: Any, keyword: str) -> bool:
@@ -240,7 +285,8 @@ def _with_stock_summary(engine: DataEngine, row: dict[str, Any]) -> dict[str, An
     symbol = row.get("symbol")
     if not isinstance(symbol, str):
         return row
-    stock = engine.get_stock_summary(symbol)
+    row_date = row.get("latest_date")
+    stock = engine.get_stock_summary(symbol, end_date=row_date if isinstance(row_date, str) else None)
     if not stock:
         return row
     merged = dict(row)
@@ -252,6 +298,124 @@ def _with_stock_summary(engine: DataEngine, row: dict[str, Any]) -> dict[str, An
     if merged.get("close") is None:
         merged["close"] = stock.get("close")
     return merged
+
+
+def _normalize_backtest_days(raw_days: list[int] | None) -> list[int]:
+    days = raw_days or [1, 3, 5]
+    normalized: list[int] = []
+    for raw_day in days:
+        try:
+            day = int(raw_day)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="backtest_days must be positive integers") from exc
+        if day <= 0 or day > 120:
+            raise HTTPException(status_code=422, detail="backtest_days must be between 1 and 120")
+        if day not in normalized:
+            normalized.append(day)
+    if len(normalized) > 8:
+        raise HTTPException(status_code=422, detail="backtest_days supports at most 8 horizons")
+    return normalized or [1, 3, 5]
+
+
+def _attach_backtest_returns(
+    engine: DataEngine,
+    rows: list[dict[str, Any]],
+    horizons: list[int],
+) -> dict[str, Any]:
+    for row in rows:
+        row["backtest_returns"] = {}
+    if not rows:
+        return {"horizons": horizons, "summary": []}
+
+    max_horizon = max(horizons)
+    conn = sqlite3.connect(engine.db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        for row in rows:
+            symbol = row.get("symbol")
+            base_date = row.get("latest_date")
+            base_close = _optional_float(row.get("close"))
+            if not isinstance(symbol, str) or not isinstance(base_date, str):
+                continue
+            if base_close is None or base_close <= 0:
+                continue
+
+            quote_rows = conn.execute(
+                """
+                SELECT date, close
+                FROM stock_daily
+                WHERE symbol = ? AND date >= ?
+                ORDER BY date ASC
+                LIMIT ?
+                """,
+                (symbol, base_date, max_horizon + 1),
+            ).fetchall()
+            if not quote_rows or str(quote_rows[0]["date"]) != base_date:
+                continue
+
+            returns: dict[str, float] = {}
+            for day in horizons:
+                if len(quote_rows) <= day:
+                    continue
+                future_close = _optional_float(quote_rows[day]["close"])
+                if future_close is None:
+                    continue
+                returns[str(day)] = round((future_close - base_close) / base_close * 100, 4)
+            row["backtest_returns"] = returns
+    finally:
+        conn.close()
+
+    return {
+        "horizons": horizons,
+        "summary": _summarize_backtest(rows, horizons),
+    }
+
+
+def _summarize_backtest(rows: list[dict[str, Any]], horizons: list[int]) -> list[dict[str, Any]]:
+    total = len(rows)
+    summary = []
+    for day in horizons:
+        key = str(day)
+        values = [
+            float(row["backtest_returns"][key])
+            for row in rows
+            if isinstance(row.get("backtest_returns"), dict)
+            and _is_number(row["backtest_returns"].get(key))
+        ]
+        evaluated = len(values)
+        up_gt_1 = sum(1 for value in values if value > 1)
+        down_gt_1 = sum(1 for value in values if value < -1)
+        flat_between_1 = sum(1 for value in values if -1 <= value <= 1)
+        up_gt_10 = sum(1 for value in values if value > 10)
+        down_gt_10 = sum(1 for value in values if value < -10)
+        summary.append(
+            {
+                "days": day,
+                "evaluated": evaluated,
+                "missing": total - evaluated,
+                "average_pct": round(sum(values) / evaluated, 4) if evaluated else None,
+                "median_pct": round(float(median(values)), 4) if evaluated else None,
+                "up_gt_1": up_gt_1,
+                "up_gt_1_ratio": _ratio(up_gt_1, evaluated),
+                "down_gt_1": down_gt_1,
+                "down_gt_1_ratio": _ratio(down_gt_1, evaluated),
+                "flat_between_1": flat_between_1,
+                "flat_between_1_ratio": _ratio(flat_between_1, evaluated),
+                "up_gt_10": up_gt_10,
+                "up_gt_10_ratio": _ratio(up_gt_10, evaluated),
+                "down_gt_10": down_gt_10,
+                "down_gt_10_ratio": _ratio(down_gt_10, evaluated),
+            }
+        )
+    return summary
+
+
+def _ratio(count: int, total: int) -> float:
+    return round(count / total * 100, 2) if total else 0.0
+
+
+def _is_number(value: Any) -> bool:
+    return _optional_float(value) is not None
 
 
 def summarize_market_data(engine: DataEngine) -> dict[str, Any]:
@@ -311,9 +475,13 @@ def _start_job(
     return {"job_id": job.job_id, "status": job.status}
 
 
-def _symbol_to_result_row(engine: DataEngine, symbol: str) -> StrategyResultRow:
+def _symbol_to_result_row(
+    engine: DataEngine,
+    symbol: str,
+    end_date: str | None = None,
+) -> StrategyResultRow:
     try:
-        df = engine.get_ohlcv(symbol)
+        df = engine.get_ohlcv(symbol, end_date=end_date)
     except Exception:
         return StrategyResultRow(symbol=symbol)
 

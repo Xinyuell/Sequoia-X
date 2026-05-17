@@ -34,6 +34,7 @@
               <div class="button-row">
                 <button id="refreshDataBtn" class="secondary">刷新状态</button>
                 <button id="syncBtn">增量同步</button>
+                <button id="metadataSyncBtn" class="secondary">同步股票画像</button>
               </div>
             </div>
 
@@ -122,9 +123,56 @@
                 <label class="field-label" for="referenceDate">计算参考日期</label>
                 <input id="referenceDate" type="date" />
                 <p class="description">策略将基于此日期往回计算，留空则使用最新数据</p>
+                <label class="field-label compact-field" for="backtestDays">回测交易日</label>
+                <input id="backtestDays" type="text" value="1,3,5" />
+                <p class="description">用逗号分隔，例如 1,3,5；结果会计算参考日后对应交易日涨跌幅</p>
               </div>
 
               <form id="parameterForm" class="parameter-grid"></form>
+
+              <div class="panel strategy-filter-panel">
+                <div class="panel-title">股票池筛选</div>
+                <div class="filter-grid">
+                  <label class="field-label" for="industryFilter">
+                    行业板块
+                    <select id="industryFilter" multiple></select>
+                  </label>
+                  <label class="field-label" for="conceptFilter">
+                    概念板块
+                    <select id="conceptFilter" multiple></select>
+                  </label>
+                  <label class="field-label" for="marketFilter">
+                    交易所
+                    <select id="marketFilter" multiple></select>
+                  </label>
+                  <label class="field-label" for="minListedDays">
+                    上市满交易日
+                    <input id="minListedDays" type="number" min="0" step="1" value="0" />
+                  </label>
+                  <label class="field-label" for="minAvgTurnover20">
+                    20日均成交额
+                    <span class="input-with-unit">
+                      <input id="minAvgTurnover20" type="number" min="0" step="1000" value="0" />
+                      <span class="unit">万</span>
+                    </span>
+                  </label>
+                  <div class="risk-filter">
+                    <div class="field-label">高风险股</div>
+                    <label class="checkbox-row" for="excludeDelisted">
+                      <input id="excludeDelisted" type="checkbox" data-risk-filter="delisted" />
+                      <span>排除退市股</span>
+                    </label>
+                    <label class="checkbox-row" for="excludeSt">
+                      <input id="excludeSt" type="checkbox" data-risk-filter="st" />
+                      <span>排除 ST 股</span>
+                    </label>
+                    <label class="checkbox-row" for="excludeSuspended">
+                      <input id="excludeSuspended" type="checkbox" data-risk-filter="suspended" />
+                      <span>排除停牌股</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div id="strategyProgress" class="strategy-progress-panel muted" aria-live="polite">暂无运行中的策略</div>
@@ -137,6 +185,7 @@
               <div id="resultCount" class="count-pill">0 只</div>
             </div>
             <div id="resultMeta" class="result-meta muted">尚未运行策略</div>
+            <div id="resultBacktestSummary" class="backtest-summary muted"></div>
             <div class="table-wrap">
               <table>
                 <thead>

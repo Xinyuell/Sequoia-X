@@ -36,7 +36,7 @@ class LimitUpShakeoutStrategy(BaseStrategy):
 
         for symbol in symbols:
             try:
-                df = self.engine.get_ohlcv(symbol)
+                df = self.engine.get_ohlcv(symbol, end_date=self.reference_date)
                 if len(df) < self._MIN_BARS:
                     continue
 

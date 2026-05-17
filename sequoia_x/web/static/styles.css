@@ -351,6 +351,39 @@ h1 {
   background: #ffffff;
 }
 
+.chart-tooltip {
+  position: fixed;
+  z-index: 1000;
+  display: none;
+  min-width: 148px;
+  max-width: 220px;
+  border: 1px solid #e0e4e8;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 14px 34px rgba(16, 24, 40, 0.16);
+  color: var(--text);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.chart-tooltip-title {
+  margin-bottom: 6px;
+  color: #4d5964;
+  font-weight: 700;
+}
+
+.chart-tooltip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  line-height: 1.65;
+}
+
+.chart-tooltip-row span {
+  color: var(--muted);
+}
+
 .strategy-layout {
   display: grid;
   grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
@@ -393,11 +426,41 @@ input:focus {
   line-height: 1.55;
 }
 
+.compact-field {
+  margin-top: 14px;
+}
+
 .parameter-grid {
   display: grid;
   grid-column: 1 / -1;
   grid-template-columns: repeat(4, minmax(150px, 1fr));
   gap: 12px;
+}
+
+.strategy-filter-panel {
+  grid-column: 1 / -1;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.filter-grid select[multiple] {
+  min-height: 96px;
+}
+
+.risk-filter {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  min-height: 96px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fbfcfd;
 }
 
 .parameter-field {
@@ -480,6 +543,31 @@ input:focus {
   font-size: 14px;
 }
 
+.backtest-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 12px;
+}
+
+.backtest-chip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+  max-width: 100%;
+  border: 1px solid #d5dde3;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #ffffff;
+   font-size: 18px;
+}
+
+.backtest-chip strong {
+  color: var(--primary-hover);
+}
+
 .muted {
   color: var(--muted);
 }
@@ -506,6 +594,10 @@ table {
   min-width: 820px;
   border-collapse: collapse;
   table-layout: fixed;
+}
+
+#resultsView table {
+  min-width: 1080px;
 }
 
 th,
@@ -563,6 +655,20 @@ tbody tr.selected {
   background: #fff8ed;
   color: #6b4215;
   font-size: 12px;
+}
+
+.return-positive {
+  color: #b3261e;
+  font-weight: 700;
+}
+
+.return-negative {
+  color: #126a5e;
+  font-weight: 700;
+}
+
+.return-flat {
+  color: var(--muted);
 }
 
 .result-detail-panel {
@@ -731,6 +837,7 @@ tbody tr.selected {
 
   .metric-grid,
   .parameter-grid,
+  .filter-grid,
   .strategy-layout,
   .data-update-panel,
   .stock-browser,
@@ -756,6 +863,7 @@ tbody tr.selected {
 
   .metric-grid,
   .parameter-grid,
+  .filter-grid,
   .strategy-layout,
   .data-update-panel,
   .stock-browser,

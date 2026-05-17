@@ -51,3 +51,29 @@ def test_unique_symbol_date_constraint(symbol: str, trade_date: date) -> None:
                 (symbol, str(trade_date)),
             ).fetchone()[0]
         assert count == 1
+
+
+def test_data_engine_initializes_board_tables_and_basic_columns(tmp_path) -> None:
+    engine = DataEngine(
+        Settings(
+            db_path=str(tmp_path / "metadata.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+        )
+    )
+
+    with sqlite3.connect(engine.db_path) as conn:
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(stock_basic)").fetchall()
+        }
+        board_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='stock_boards'"
+        ).fetchone()
+        member_table = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='stock_board_members'"
+        ).fetchone()
+
+    assert {"market", "list_date", "out_date", "industry_board_name", "concept_board_names_json"} <= columns
+    assert board_table is not None
+    assert member_table is not None
