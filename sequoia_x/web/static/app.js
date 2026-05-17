@@ -732,42 +732,34 @@ function renderSidewaysResultCells(row) {
 
 function resultDetailPanelHtml() {
   return `
-    <div id="resultDetailPanel" class="panel result-detail-panel">
-      <div class="result-detail-head">
-        <div>
-          <div class="panel-title" id="resultDetailTitle">股票详情</div>
-          <div class="muted" id="resultDetailMeta">点击上方结果中的股票查看详情</div>
-        </div>
-        <div class="period-tabs" aria-label="K 线周期">
-          <button class="period-tab ${state.resultPeriod === "day" ? "active" : ""}" data-result-period="day">日K</button>
-          <button class="period-tab ${state.resultPeriod === "week" ? "active" : ""}" data-result-period="week">周K</button>
-          <button class="period-tab ${state.resultPeriod === "month" ? "active" : ""}" data-result-period="month">月K</button>
-          <button class="period-tab ${state.resultPeriod === "quarter" ? "active" : ""}" data-result-period="quarter">季K</button>
-          <button class="period-tab ${state.resultPeriod === "year" ? "active" : ""}" data-result-period="year">年K</button>
-        </div>
-      </div>
-
-      <div id="resultMetricGrid" class="detail-stat-grid"></div>
-
+    <div id="resultDetailPanel" class="panel result-detail-panel compact-result-detail">
       <div class="result-chart-shell">
-        <div class="chart-head">
-          <div>
-            <div class="panel-title" id="resultKlineTitle">K 线</div>
-            <div class="muted" id="resultKlineMeta">--</div>
-          </div>
+        <div class="result-chart-toolbar">
+          <div id="resultKlineTitle" class="sr-only">K 线</div>
+          <div id="resultKlineMeta" class="sr-only">--</div>
+          <div></div>
+          ${periodButtonsHtml()}
         </div>
-        <canvas id="resultStockChart" width="900" height="460"></canvas>
-        <div class="range-row">
+        <canvas id="resultStockChart" width="900" height="420"></canvas>
+        <div class="range-row compact-range-row">
           <input id="resultRange" type="range" min="0" max="0" value="0" />
           <span id="resultRangeLabel">--</span>
         </div>
       </div>
 
-      <div class="quote-table-wrap">
-        <table class="quote-table">
-          <tbody id="resultQuoteRows"></tbody>
-        </table>
-      </div>
+      <div id="resultMetricGrid" class="detail-stat-grid compact-detail-grid"></div>
+    </div>
+  `;
+}
+
+function periodButtonsHtml() {
+  return `
+    <div class="period-tabs" aria-label="K 线周期">
+      <button class="period-tab ${state.resultPeriod === "day" ? "active" : ""}" data-result-period="day">日K</button>
+      <button class="period-tab ${state.resultPeriod === "week" ? "active" : ""}" data-result-period="week">周K</button>
+      <button class="period-tab ${state.resultPeriod === "month" ? "active" : ""}" data-result-period="month">月K</button>
+      <button class="period-tab ${state.resultPeriod === "quarter" ? "active" : ""}" data-result-period="quarter">季K</button>
+      <button class="period-tab ${state.resultPeriod === "year" ? "active" : ""}" data-result-period="year">年K</button>
     </div>
   `;
 }
@@ -829,8 +821,6 @@ async function loadResultStockDetail(symbol) {
     button.classList.toggle("active", button.dataset.resultPeriod === state.resultPeriod);
   });
 
-  byId("resultDetailTitle").textContent = `${selectedRow.name || selectedRow.stock?.name || symbol} ${symbol}`;
-  byId("resultDetailMeta").textContent = "K 线加载中";
   renderResultMetricGrid(selectedRow);
 
   try {
@@ -839,8 +829,7 @@ async function loadResultStockDetail(symbol) {
     );
     state.resultSeries = payload.rows || [];
     state.resultSeriesStock = payload.stock || selectedRow.stock || selectedRow;
-    byId("resultDetailTitle").textContent = `${state.resultSeriesStock.name || selectedRow.name || symbol} ${symbol}`;
-    renderResultQuoteRows(state.resultSeriesStock, selectedRow);
+    renderResultMetricGrid(selectedRow, state.resultSeriesStock);
     setupResultRange();
     renderResultChartWindow();
   } catch (error) {
@@ -849,26 +838,24 @@ async function loadResultStockDetail(symbol) {
       titleId: "resultKlineTitle",
       metaId: "resultKlineMeta",
     });
-    byId("resultDetailMeta").textContent = error.message;
   }
 }
 
-function renderResultMetricGrid(row) {
-  const stock = row.stock || {};
+function renderResultMetricGrid(row, resolvedStock = null) {
+  const stock = resolvedStock || row.stock || {};
   const metrics = row.metrics || {};
   const cards = [
-    ["名称", row.name || stock.name || row.symbol || "--"],
-    ["代码", row.symbol || "--"],
     ["最新日期", row.latest_date || stock.latest_date || "--"],
     ["收盘价", formatMaybeNumber(row.close ?? stock.close)],
-    ["数据起始", stock.earliest_date || "--"],
-    ["样本数量", formatNumber(stock.row_count || 0)],
     ["开盘价", formatMaybeNumber(stock.open)],
     ["最高价", formatMaybeNumber(stock.high)],
     ["最低价", formatMaybeNumber(stock.low)],
     ["成交量", formatNumber(stock.volume)],
     ["成交额", formatMaybeNumber(stock.turnover)],
-    ...Object.entries(metrics).map(([key, value]) => [metricLabel(key), formatMetricValue(key, value)]),
+    ["区间最高价(复权后)", formatMaybeNumber(metrics.window_high)],
+    ["区间最低价(复权后)", formatMaybeNumber(metrics.window_low)],
+    ["区间振幅", formatMetricValue("amplitude_pct", metrics.amplitude_pct)],
+    ["距区间高点", formatMetricValue("distance_to_high_pct", metrics.distance_to_high_pct)],
   ];
   byId("resultMetricGrid").innerHTML = cards
     .map(
@@ -879,26 +866,6 @@ function renderResultMetricGrid(row) {
         </div>
       `,
     )
-    .join("");
-}
-
-function renderResultQuoteRows(stock, row) {
-  const items = [
-    ["股票名称", stock.name || row.name || "--"],
-    ["股票代码", stock.symbol || row.symbol || "--"],
-    ["交易所代码", stock.code || row.code || "--"],
-    ["本地最早日期", stock.earliest_date || "--"],
-    ["本地最新日期", stock.latest_date || row.latest_date || "--"],
-    ["本地行情行数", formatNumber(stock.row_count || 0)],
-    ["最新开盘", formatMaybeNumber(stock.open)],
-    ["最新最高", formatMaybeNumber(stock.high)],
-    ["最新最低", formatMaybeNumber(stock.low)],
-    ["最新收盘", formatMaybeNumber(stock.close ?? row.close)],
-    ["最新成交量", formatNumber(stock.volume)],
-    ["最新成交额", formatMaybeNumber(stock.turnover)],
-  ];
-  byId("resultQuoteRows").innerHTML = items
-    .map(([label, value]) => `<tr><th>${escapeHtml(label)}</th><td>${escapeHtml(value)}</td></tr>`)
     .join("");
 }
 
