@@ -877,10 +877,10 @@ function renderBacktestSummary(backtest) {
         <strong>+${escapeHtml(item.days)}日</strong>
         <span>${escapeHtml(formatNumber(item.evaluated))}只股票</span>
         <span>平均涨跌幅:${escapeHtml(formatSignedPercent(item.average_pct))}；</span>
-        <span>涨幅大于1%，共${escapeHtml(formatNumber(item.up_gt_1))}(${escapeHtml(formatPercent(item.up_gt_1_ratio))})</span>
-        <span>跌幅大于-1%，共${escapeHtml(formatNumber(item.down_gt_1))}(${escapeHtml(formatPercent(item.down_gt_1_ratio))})</span>
-        <span>-1%~1%之间，共 ${escapeHtml(formatNumber(item.flat_between_1))}(${escapeHtml(formatPercent(item.flat_between_1_ratio))}</span>
-        <span>涨幅超过10%，共${escapeHtml(formatNumber(item.up_gt_10))}(${escapeHtml(formatPercent(item.up_gt_10_ratio))})</span>
+        <span>涨幅大于1%，共${escapeHtml(formatNumber(item.up_gt_1))}(${escapeHtml(formatPercent(item.up_gt_1_ratio))})；</span>
+        <span>跌幅大于-1%，共${escapeHtml(formatNumber(item.down_gt_1))}(${escapeHtml(formatPercent(item.down_gt_1_ratio))})；</span>
+        <span>-1%~1%之间，共 ${escapeHtml(formatNumber(item.flat_between_1))}(${escapeHtml(formatPercent(item.flat_between_1_ratio))});</span>
+        <span>涨幅超过10%，共${escapeHtml(formatNumber(item.up_gt_10))}(${escapeHtml(formatPercent(item.up_gt_10_ratio))});</span>
         <span>跌幅超过10%，共${escapeHtml(formatNumber(item.down_gt_10))}(${escapeHtml(formatPercent(item.down_gt_10_ratio))})</span>
       </div>
     `)
