@@ -882,7 +882,7 @@ function renderResults(result) {
   byId("resultMeta").textContent = [result.strategy_name, referenceText, parameterText, filterText]
     .filter(Boolean)
     .join("；");
-  renderBacktestSummary(result.backtest);
+  renderBacktestReport(result);
 
   const rows = result.rows || [];
   renderResultHeader(result);
@@ -929,18 +929,160 @@ function renderBacktestSummary(backtest) {
     .join("");
 }
 
+function renderBacktestReport(result) {
+  const panel = byId("resultReport");
+  const backtest = result?.backtest || {};
+  const summary = backtest.summary || [];
+  if (!summary.length) {
+    panel.className = "selection-report muted";
+    panel.textContent = "尚无历史表现验证数据";
+    return;
+  }
+  const overview = backtest.overview || {
+    total: result.total || 0,
+    valid: Math.max(...summary.map((item) => Number(item.evaluated || item.sample_count || 0)), 0),
+    invalid: 0,
+  };
+  const signalDate = result.reference_date || firstResultDate(result) || "--";
+  panel.className = "selection-report";
+  panel.innerHTML = `
+    <div class="report-hero">
+      <div class="report-title-block">
+        <div>
+          <div class="eyebrow">历史表现验证</div>
+          <h2>${escapeHtml(result.strategy_name || "策略结果")} · 信号日 ${escapeHtml(signalDate)}</h2>
+        </div>
+        <div class="report-meta-line">
+          <span>入选 ${escapeHtml(formatNumber(overview.total))} 只</span>
+          <span>有效样本 ${escapeHtml(formatNumber(overview.valid))} 只</span>
+          <span>无效样本 ${escapeHtml(formatNumber(overview.invalid))} 只</span>
+        </div>
+        <div class="sample-grid">
+          ${sampleCardHtml("入选股票", overview.total)}
+          ${sampleCardHtml("有效样本", overview.valid)}
+          ${sampleCardHtml("无效样本", overview.invalid)}
+        </div>
+      </div>
+      <div class="horizon-grid">
+        ${summary.map((item) => horizonCardHtml(item)).join("")}
+      </div>
+    </div>
+    <div class="report-band">
+      <div class="distribution-panel">
+        <div class="panel-title">收益分布</div>
+        ${distributionTableHtml(backtest)}
+      </div>
+      <div class="note-panel">
+        <div class="panel-title">样本说明</div>
+        <p><strong>有效样本：</strong>至少一个持有期有可计算收益。</p>
+        <p><strong>无效样本：</strong>信号日缺少收盘价、未来交易日不足或目标日价格缺失。</p>
+        <p><strong>读法：</strong>先看均值、胜率，再看分布表中极端涨跌是否集中。</p>
+      </div>
+    </div>
+  `;
+}
+
+function firstResultDate(result) {
+  return (result?.rows || []).find((row) => row.latest_date)?.latest_date || "";
+}
+
+function sampleCardHtml(label, value) {
+  return `
+    <div class="sample-card">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(formatNumber(value))}</strong>
+    </div>
+  `;
+}
+
+function horizonCardHtml(item) {
+  const sampleCount = item.sample_count ?? item.evaluated ?? 0;
+  return `
+    <div class="horizon-card">
+      <div class="horizon-head">
+        <strong>+${escapeHtml(item.days)}日</strong>
+        <span>${escapeHtml(formatNumber(sampleCount))} 样本</span>
+      </div>
+      <div class="horizon-score ${backtestReturnClass(item.average_pct)}">${escapeHtml(formatSignedPercent(item.average_pct))}</div>
+      <div class="stat-list">
+        <div><span>中位数</span><strong class="${backtestReturnClass(item.median_pct)}">${escapeHtml(formatSignedPercent(item.median_pct))}</strong></div>
+        <div><span>胜率</span><strong>${escapeHtml(formatPercent(item.win_rate ?? 0))}</strong></div>
+        <div><span>≥ 1%</span><strong class="return-positive">${escapeHtml(formatNumber(item.gt_1_count ?? item.up_gt_1 ?? 0))} 只</strong></div>
+        <div><span>≤ -1%</span><strong class="return-negative">${escapeHtml(formatNumber(item.lt_minus_1_count ?? item.down_gt_1 ?? 0))} 只</strong></div>
+      </div>
+    </div>
+  `;
+}
+
+function distributionTableHtml(backtest) {
+  const horizons = backtest.horizons || [];
+  const rows = backtest.distribution || [];
+  if (!horizons.length || !rows.length) {
+    return '<div class="muted">暂无收益分布数据</div>';
+  }
+  return `
+    <div class="distribution-table-wrap">
+      <table class="distribution-table">
+        <thead>
+          <tr>
+            <th>收益区间</th>
+            ${horizons.map((day) => `<th>+${escapeHtml(day)}日</th>`).join("")}
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map((row) => distributionRowHtml(row, horizons)).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function distributionRowHtml(row, horizons) {
+  return `
+    <tr>
+      <td class="${bucketClass(row.bucket)}">${escapeHtml(row.bucket)}</td>
+      ${horizons.map((day) => distributionCellHtml(row, String(day))).join("")}
+    </tr>
+  `;
+}
+
+function distributionCellHtml(row, key) {
+  const rate = Number(row.rates?.[key] || 0);
+  const count = Number(row.counts?.[key] || 0);
+  const width = Math.max(2, Math.min(100, rate));
+  return `
+    <td>
+      <div class="bar-cell">
+        <span>${escapeHtml(formatPercent(rate))}</span>
+        <div class="mini-bar ${bucketClass(row.bucket)}"><span style="width: ${width}%"></span></div>
+        <em>${escapeHtml(formatNumber(count))}只</em>
+      </div>
+    </td>
+  `;
+}
+
+function bucketClass(bucket) {
+  if (String(bucket).startsWith("-") || String(bucket).startsWith("<=")) {
+    return "return-negative";
+  }
+  if (String(bucket).startsWith("1") || String(bucket).startsWith("5") || String(bucket).startsWith(">=")) {
+    return "return-positive";
+  }
+  return "return-flat";
+}
+
 function renderResultHeader(result) {
   const headers = result.strategy_key === "sideways_consolidation"
     ? ["名称", "代码", "最新日期", "收盘价", "区间振幅", "距区间高点"]
     : ["名称", "代码", "最新日期", "收盘价", "策略", "指标"];
   const backtestHeaders = backtestHorizons(result).map((day) => `+${day}日涨跌`);
-  byId("resultHeadRow").innerHTML = [...headers, ...backtestHeaders]
+  byId("resultHeadRow").innerHTML = [...headers, ...backtestHeaders, "回测状态"]
     .map((header) => `<th>${escapeHtml(header)}</th>`)
     .join("");
 }
 
 function resultColumnCount(result) {
-  return 6 + backtestHorizons(result).length;
+  return 7 + backtestHorizons(result).length;
 }
 
 function backtestHorizons(result) {
@@ -967,7 +1109,7 @@ function renderResultRow(row, result, columnCount) {
   const baseCells = result.strategy_key === "sideways_consolidation"
     ? renderSidewaysResultCells(row)
     : renderDefaultResultCells(row, result.strategy_name);
-  const cells = `${baseCells}${renderBacktestReturnCells(row, result)}`;
+  const cells = `${baseCells}${renderBacktestReturnCells(row, result)}${renderBacktestStatusCell(row)}`;
   const detail = selected
     ? `<tr class="result-detail-row"><td colspan="${columnCount}">${resultDetailPanelHtml()}</td></tr>`
     : "";
@@ -1016,6 +1158,21 @@ function renderBacktestReturnCells(row, result) {
       return `<td class="${backtestReturnClass(value)}">${escapeHtml(formatSignedPercent(value))}</td>`;
     })
     .join("");
+}
+
+function renderBacktestStatusCell(row) {
+  if (row.backtest_valid === true) {
+    return "<td>有效</td>";
+  }
+  return `<td class="muted">${escapeHtml(backtestInvalidReasonLabel(row.backtest_invalid_reason))}</td>`;
+}
+
+function backtestInvalidReasonLabel(reason) {
+  return {
+    missing_signal_price: "信号日价格缺失",
+    insufficient_future_data: "未来数据不足",
+    missing_target_price: "目标日价格缺失",
+  }[reason] || "N/A";
 }
 
 function backtestReturnClass(value) {

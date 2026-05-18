@@ -214,6 +214,7 @@ def test_api_adds_backtest_returns_and_summary(tmp_path) -> None:
             }
         )
     insert_rows(engine, "000001", rows)
+    insert_rows(engine, "000002", rows[:20])
     app = create_app(settings=settings, engine=engine, jobs=InMemoryJobManager(run_async=False))
     client = TestClient(app)
 
@@ -234,14 +235,35 @@ def test_api_adds_backtest_returns_and_summary(tmp_path) -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["backtest"]["horizons"] == [1, 3, 5]
-    returns = payload["rows"][0]["backtest_returns"]
+    assert payload["backtest"]["overview"] == {
+        "total": 2,
+        "valid": 1,
+        "invalid": 1,
+    }
+    rows_by_symbol = {row["symbol"]: row for row in payload["rows"]}
+    assert rows_by_symbol["000001"]["backtest_valid"] is True
+    assert rows_by_symbol["000001"]["backtest_invalid_reason"] is None
+    assert rows_by_symbol["000002"]["backtest_valid"] is False
+    assert rows_by_symbol["000002"]["backtest_invalid_reason"] == "insufficient_future_data"
+
+    returns = rows_by_symbol["000001"]["backtest_returns"]
     assert returns["1"] > 1
     assert returns["3"] < -1
     assert returns["5"] < -10
     summary_by_day = {item["days"]: item for item in payload["backtest"]["summary"]}
-    assert summary_by_day[1]["up_gt_1"] == 1
-    assert summary_by_day[3]["down_gt_1"] == 1
-    assert summary_by_day[5]["down_gt_10"] == 1
+    assert summary_by_day[1]["sample_count"] == 1
+    assert summary_by_day[1]["win_count"] == 1
+    assert summary_by_day[1]["win_rate"] == 100
+    assert summary_by_day[1]["gt_1_count"] == 1
+    assert summary_by_day[3]["lt_minus_1_count"] == 1
+    assert summary_by_day[5]["lt_minus_10_count"] == 1
+    distribution_by_bucket = {
+        item["bucket"]: item
+        for item in payload["backtest"]["distribution"]
+    }
+    assert distribution_by_bucket["1% ~ 5%"]["counts"]["1"] == 1
+    assert distribution_by_bucket["-5% ~ -1%"]["counts"]["3"] == 1
+    assert distribution_by_bucket["<= -10%"]["counts"]["5"] == 1
 
 
 def test_api_lists_stock_filter_options(tmp_path) -> None:

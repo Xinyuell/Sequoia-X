@@ -324,8 +324,15 @@ def _attach_backtest_returns(
 ) -> dict[str, Any]:
     for row in rows:
         row["backtest_returns"] = {}
+        row["backtest_valid"] = False
+        row["backtest_invalid_reason"] = "missing_signal_price"
     if not rows:
-        return {"horizons": horizons, "summary": []}
+        return {
+            "horizons": horizons,
+            "overview": {"total": 0, "valid": 0, "invalid": 0},
+            "summary": [],
+            "distribution": _build_backtest_distribution(rows, horizons),
+        }
 
     max_horizon = max(horizons)
     conn = sqlite3.connect(engine.db_path)
@@ -336,8 +343,10 @@ def _attach_backtest_returns(
             base_date = row.get("latest_date")
             base_close = _optional_float(row.get("close"))
             if not isinstance(symbol, str) or not isinstance(base_date, str):
+                row["backtest_invalid_reason"] = "missing_signal_price"
                 continue
             if base_close is None or base_close <= 0:
+                row["backtest_invalid_reason"] = "missing_signal_price"
                 continue
 
             quote_rows = conn.execute(
@@ -351,23 +360,40 @@ def _attach_backtest_returns(
                 (symbol, base_date, max_horizon + 1),
             ).fetchall()
             if not quote_rows or str(quote_rows[0]["date"]) != base_date:
+                row["backtest_invalid_reason"] = "missing_signal_price"
                 continue
 
             returns: dict[str, float] = {}
+            saw_missing_target = False
             for day in horizons:
                 if len(quote_rows) <= day:
                     continue
                 future_close = _optional_float(quote_rows[day]["close"])
-                if future_close is None:
+                if future_close is None or future_close <= 0:
+                    saw_missing_target = True
                     continue
                 returns[str(day)] = round((future_close - base_close) / base_close * 100, 4)
             row["backtest_returns"] = returns
+            if returns:
+                row["backtest_valid"] = True
+                row["backtest_invalid_reason"] = None
+            elif saw_missing_target:
+                row["backtest_invalid_reason"] = "missing_target_price"
+            else:
+                row["backtest_invalid_reason"] = "insufficient_future_data"
     finally:
         conn.close()
 
+    valid = sum(1 for row in rows if row.get("backtest_valid") is True)
     return {
         "horizons": horizons,
+        "overview": {
+            "total": len(rows),
+            "valid": valid,
+            "invalid": len(rows) - valid,
+        },
         "summary": _summarize_backtest(rows, horizons),
+        "distribution": _build_backtest_distribution(rows, horizons),
     }
 
 
@@ -383,31 +409,88 @@ def _summarize_backtest(rows: list[dict[str, Any]], horizons: list[int]) -> list
             and _is_number(row["backtest_returns"].get(key))
         ]
         evaluated = len(values)
-        up_gt_1 = sum(1 for value in values if value > 1)
-        down_gt_1 = sum(1 for value in values if value < -1)
+        win_count = sum(1 for value in values if value > 0)
+        gt_1 = sum(1 for value in values if value >= 1)
+        lt_minus_1 = sum(1 for value in values if value <= -1)
         flat_between_1 = sum(1 for value in values if -1 <= value <= 1)
-        up_gt_10 = sum(1 for value in values if value > 10)
-        down_gt_10 = sum(1 for value in values if value < -10)
+        gt_5 = sum(1 for value in values if value >= 5)
+        lt_minus_5 = sum(1 for value in values if value <= -5)
+        gt_10 = sum(1 for value in values if value >= 10)
+        lt_minus_10 = sum(1 for value in values if value <= -10)
         summary.append(
             {
                 "days": day,
+                "sample_count": evaluated,
                 "evaluated": evaluated,
                 "missing": total - evaluated,
                 "average_pct": round(sum(values) / evaluated, 4) if evaluated else None,
                 "median_pct": round(float(median(values)), 4) if evaluated else None,
-                "up_gt_1": up_gt_1,
-                "up_gt_1_ratio": _ratio(up_gt_1, evaluated),
-                "down_gt_1": down_gt_1,
-                "down_gt_1_ratio": _ratio(down_gt_1, evaluated),
+                "win_count": win_count,
+                "win_rate": _ratio(win_count, evaluated),
+                "gt_1_count": gt_1,
+                "gt_1_rate": _ratio(gt_1, evaluated),
+                "lt_minus_1_count": lt_minus_1,
+                "lt_minus_1_rate": _ratio(lt_minus_1, evaluated),
+                "flat_count": flat_between_1,
+                "flat_rate": _ratio(flat_between_1, evaluated),
+                "gt_5_count": gt_5,
+                "gt_5_rate": _ratio(gt_5, evaluated),
+                "lt_minus_5_count": lt_minus_5,
+                "lt_minus_5_rate": _ratio(lt_minus_5, evaluated),
+                "gt_10_count": gt_10,
+                "gt_10_rate": _ratio(gt_10, evaluated),
+                "lt_minus_10_count": lt_minus_10,
+                "lt_minus_10_rate": _ratio(lt_minus_10, evaluated),
+                "up_gt_1": gt_1,
+                "up_gt_1_ratio": _ratio(gt_1, evaluated),
+                "down_gt_1": lt_minus_1,
+                "down_gt_1_ratio": _ratio(lt_minus_1, evaluated),
                 "flat_between_1": flat_between_1,
                 "flat_between_1_ratio": _ratio(flat_between_1, evaluated),
-                "up_gt_10": up_gt_10,
-                "up_gt_10_ratio": _ratio(up_gt_10, evaluated),
-                "down_gt_10": down_gt_10,
-                "down_gt_10_ratio": _ratio(down_gt_10, evaluated),
+                "up_gt_10": gt_10,
+                "up_gt_10_ratio": _ratio(gt_10, evaluated),
+                "down_gt_10": lt_minus_10,
+                "down_gt_10_ratio": _ratio(lt_minus_10, evaluated),
             }
         )
     return summary
+
+
+def _build_backtest_distribution(
+    rows: list[dict[str, Any]],
+    horizons: list[int],
+) -> list[dict[str, Any]]:
+    buckets = [
+        ("<= -10%", lambda value: value <= -10),
+        ("-10% ~ -5%", lambda value: -10 < value <= -5),
+        ("-5% ~ -1%", lambda value: -5 < value < -1),
+        ("-1% ~ 1%", lambda value: -1 <= value <= 1),
+        ("1% ~ 5%", lambda value: 1 < value < 5),
+        ("5% ~ 10%", lambda value: 5 <= value < 10),
+        (">= 10%", lambda value: value >= 10),
+    ]
+    values_by_horizon: dict[str, list[float]] = {}
+    for day in horizons:
+        key = str(day)
+        values_by_horizon[key] = [
+            float(row["backtest_returns"][key])
+            for row in rows
+            if isinstance(row.get("backtest_returns"), dict)
+            and _is_number(row["backtest_returns"].get(key))
+        ]
+
+    distribution = []
+    for bucket, predicate in buckets:
+        counts: dict[str, int] = {}
+        rates: dict[str, float] = {}
+        for day in horizons:
+            key = str(day)
+            values = values_by_horizon[key]
+            count = sum(1 for value in values if predicate(value))
+            counts[key] = count
+            rates[key] = _ratio(count, len(values))
+        distribution.append({"bucket": bucket, "counts": counts, "rates": rates})
+    return distribution
 
 
 def _ratio(count: int, total: int) -> float:
