@@ -62,6 +62,12 @@ button.secondary:hover {
   background: #edf7f5;
 }
 
+.mini-button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 .app-shell {
   min-height: 100vh;
 }
@@ -448,8 +454,56 @@ input:focus {
   margin-top: 12px;
 }
 
-.filter-grid select[multiple] {
-  min-height: 96px;
+.filter-field {
+  min-width: 0;
+}
+
+.filter-grid .field-label > input,
+.filter-grid .field-label > .input-with-unit {
+  margin-top: 7px;
+}
+
+.field-help {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+}
+
+.checkbox-filter-group {
+  display: grid;
+  gap: 8px;
+  min-height: 126px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfcfd;
+}
+
+.filter-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.filter-option-list {
+  display: grid;
+  gap: 4px;
+  max-height: 190px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.filter-option {
+  min-height: 30px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.filter-empty {
+  min-height: 52px;
+  align-content: center;
 }
 
 .risk-filter {

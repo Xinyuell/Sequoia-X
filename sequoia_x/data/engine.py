@@ -103,6 +103,40 @@ _CREATE_STOCK_BOARD_MEMBERS_BOARD_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_stock_board_members_board ON stock_board_members (board_type, board_code);
 """
 
+_PRIMARY_INDUSTRY_NAMES = {
+    "农林牧渔",
+    "煤炭",
+    "石油石化",
+    "基础化工",
+    "钢铁",
+    "有色金属",
+    "电子",
+    "家用电器",
+    "食品饮料",
+    "纺织服饰",
+    "轻工制造",
+    "医药生物",
+    "公用事业",
+    "交通运输",
+    "房地产",
+    "商贸零售",
+    "社会服务",
+    "综合",
+    "建筑材料",
+    "建筑装饰",
+    "电力设备",
+    "国防军工",
+    "计算机",
+    "传媒",
+    "通信",
+    "银行",
+    "非银金融",
+    "汽车",
+    "机械设备",
+    "美容护理",
+    "环保",
+}
+
 
 def _latest_weekday_on_or_before(value: date) -> date:
     while value.weekday() >= 5:
@@ -1318,17 +1352,47 @@ class DataEngine:
 
         board_count = 0
         member_count = 0
+        board_failures = 0
         for board_type in ("industry", "concept"):
-            boards, members = self._fetch_akshare_boards(board_type, local_symbols, emit)
+            board_label = "行业" if board_type == "industry" else "概念"
+            try:
+                boards, members = self._fetch_akshare_boards(board_type, local_symbols, emit)
+            except Exception as exc:
+                board_failures += 1
+                logger.warning(f"{board_label}板块同步失败，保留本地缓存: {exc}")
+                emit(
+                    f"{board_label}板块同步失败，已保留本地缓存",
+                    total=2,
+                    processed=1 if board_type == "industry" else 2,
+                    boards=board_count,
+                    members=member_count,
+                    board_failures=board_failures,
+                    current_action="保留板块缓存",
+                )
+                continue
+            if not boards or not members:
+                board_failures += 1
+                logger.warning(f"{board_label}板块同步返回空结果，保留本地缓存")
+                emit(
+                    f"{board_label}板块同步返回空结果，已保留本地缓存",
+                    total=2,
+                    processed=1 if board_type == "industry" else 2,
+                    boards=board_count,
+                    members=member_count,
+                    board_failures=board_failures,
+                    current_action="保留板块缓存",
+                )
+                continue
             self._write_stock_boards(boards, members, board_type)
             board_count += len(boards)
             member_count += len(members)
             emit(
-                f"{'行业' if board_type == 'industry' else '概念'}板块同步完成",
+                f"{board_label}板块同步完成",
                 total=2,
                 processed=1 if board_type == "industry" else 2,
                 boards=board_count,
                 members=member_count,
+                board_failures=board_failures,
             )
 
         self._refresh_stock_basic_board_cache()
@@ -1337,6 +1401,7 @@ class DataEngine:
             "basic_records": len(basic_records),
             "boards": board_count,
             "members": member_count,
+            "board_failures": board_failures,
         }
 
     def _fetch_akshare_boards(
@@ -1522,7 +1587,7 @@ class DataEngine:
         industries = [
             {"code": row["board_code"], "name": row["board_name"]}
             for row in boards
-            if row["board_type"] == "industry"
+            if row["board_type"] == "industry" and row["board_name"] in _PRIMARY_INDUSTRY_NAMES
         ]
         concepts = [
             {"code": row["board_code"], "name": row["board_name"]}

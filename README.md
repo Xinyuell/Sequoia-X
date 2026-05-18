@@ -1,6 +1,6 @@
 # Sequoia-X: 王者回归 | The King Returns
 
-> A 股量化选股系统 V2 | A-Share Quantitative Stock Selection System V2
+> A 股量化选股系统 
 
 ---
 
@@ -9,77 +9,11 @@
 Sequoia-X V2 是面向 A 股市场的量化选股系统，基于现代 Python 工程化标准从零重构。
 系统以 OOP 架构、向量化计算和增量数据更新为核心设计原则，每日收盘后自动选股并推送至飞书群。
 
-数据层使用 [baostock](http://baostock.com)（免费、无需注册、无限流）拉取历史及增量日 K 数据（后复权），
-存储于本地 SQLite，彻底规避东方财富反爬问题。
+数据层使用 [baostock](http://baostock.com)拉取历史及增量日 K 数据（后复权），存储于本地 SQLite，备用Tushare数据
 
+通过webUI进行详细的策略运行，调整不同参数，选股并参看。
 ---
 
-## 两种运行模式
-
-```bash
-python main.py               # 日常模式：8进程增量补数据 + 跑策略 + 飞书推送（2~3分钟）
-python main.py --backfill     # 回填模式：全市场历史K线一次性灌入（约12分钟）
-```
-
----
-
-## 内置策略 | Strategies
-
-| 策略 | 说明 |
-|---|---|
-| **TurtleTrade** | 海龟突破：20日新高 + 成交额过亿 + 阳线防诱多，按涨幅排序 |
-| **MaVolume** | 均线+放量突破 |
-| **HighTightFlag** | 高而窄的旗形整理突破 |
-| **LimitUpShakeout** | 涨停洗盘回踩确认 |
-| **UptrendLimitDown** | 上升趋势中的跌停反包 |
-| **RpsBreakout** | 欧奈尔 RPS 相对强度突破 |
-
----
-
-## 快速开始 | Quick Start
-
-### 环境要求
-
-- Python >= 3.10
-
-### 1. 安装依赖
-
-```bash
-# 推荐使用 uv（快速包管理器）
-uv sync
-
-# 或者 pip
-pip install .
-```
-
-### 2. 配置环境变量
-
-```bash
-cp .env.example .env
-# 编辑 .env，填写飞书 Webhook URL
-```
-
-### 3. 首次回填历史数据
-
-```bash
-python main.py --backfill
-```
-
-约 12 分钟完成 ~5200 只 A 股历史后复权日 K 数据回填。
-
-### 4. 日常运行
-
-```bash
-python main.py
-```
-
-建议配合 crontab 每个交易日收盘后自动执行：
-
-```cron
-15 19 * * 1-5 cd /root/Sequoia-X && .venv/bin/python main.py >> log.txt 2>&1
-```
-
----
 
 ## 目录结构 | Project Structure
 

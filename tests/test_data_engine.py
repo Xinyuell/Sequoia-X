@@ -32,7 +32,7 @@ def make_engine_in(tmp_dir: str) -> tuple[DataEngine, Settings]:
 @h_settings(max_examples=50, deadline=None)
 def test_unique_symbol_date_constraint(symbol: str, trade_date: date) -> None:
     """相同 (symbol, date) 插入两次，数据库中该组合记录数应保持为 1。"""
-    with tempfile.TemporaryDirectory() as tmp_dir:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
         engine, _ = make_engine_in(tmp_dir)
         row = {
             "symbol": symbol, "date": str(trade_date),
@@ -77,3 +77,74 @@ def test_data_engine_initializes_board_tables_and_basic_columns(tmp_path) -> Non
     assert {"market", "list_date", "out_date", "industry_board_name", "concept_board_names_json"} <= columns
     assert board_table is not None
     assert member_table is not None
+
+
+def test_sync_stock_metadata_preserves_cached_boards_when_upstream_empty(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    engine = DataEngine(
+        Settings(
+            db_path=str(tmp_path / "metadata-cache.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+        )
+    )
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO stock_daily(symbol, date, open, high, low, close, volume, turnover)
+            VALUES ('000001', '2026-01-01', 10, 11, 9, 10.5, 1000, 10500)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_basic(symbol, code, name, status, stock_type, updated_at)
+            VALUES ('000001', 'SZ.000001', 'Sample Bank', '1', '1', '2026-05-18T00:00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
+            VALUES ('IND001', 'Banking', 'industry', 'cached', '2026-05-18T00:00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_board_members(symbol, board_code, board_type, board_name, source, fetched_at)
+            VALUES ('000001', 'IND001', 'industry', 'Banking', 'cached', '2026-05-18T00:00:00')
+            """
+        )
+        conn.commit()
+
+    monkeypatch.setattr(
+        engine,
+        "sync_stock_basic",
+        lambda: [
+            {
+                "symbol": "000001",
+                "code": "SZ.000001",
+                "name": "Sample Bank",
+                "status": "1",
+                "stock_type": "1",
+                "market": "SZ",
+                "list_date": "1991-04-03",
+                "out_date": "",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        engine,
+        "_fetch_akshare_boards",
+        lambda board_type, local_symbols, emit: ([], []),
+    )
+
+    result = engine.sync_stock_metadata()
+
+    with sqlite3.connect(engine.db_path) as conn:
+        board_count = conn.execute("SELECT COUNT(*) FROM stock_boards").fetchone()[0]
+        member_count = conn.execute("SELECT COUNT(*) FROM stock_board_members").fetchone()[0]
+
+    assert result["local_symbols"] == 1
+    assert board_count == 1
+    assert member_count == 1

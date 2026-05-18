@@ -133,21 +133,22 @@
               <div class="panel strategy-filter-panel">
                 <div class="panel-title">股票池筛选</div>
                 <div class="filter-grid">
-                  <label class="field-label" for="industryFilter">
-                    行业板块
-                    <select id="industryFilter" multiple></select>
-                  </label>
-                  <label class="field-label" for="conceptFilter">
-                    概念板块
-                    <select id="conceptFilter" multiple></select>
-                  </label>
-                  <label class="field-label" for="marketFilter">
-                    交易所
-                    <select id="marketFilter" multiple></select>
-                  </label>
+                  <div class="filter-field">
+                    <div class="field-label">行业板块</div>
+                    <div id="industryFilter" class="checkbox-filter-group" aria-label="行业板块"></div>
+                  </div>
+                  <div class="filter-field">
+                    <div class="field-label">概念板块</div>
+                    <div id="conceptFilter" class="checkbox-filter-group" aria-label="概念板块"></div>
+                  </div>
+                  <div class="filter-field">
+                    <div class="field-label">交易所</div>
+                    <div id="marketFilter" class="checkbox-filter-group" aria-label="交易所"></div>
+                  </div>
                   <label class="field-label" for="minListedDays">
                     上市满交易日
                     <input id="minListedDays" type="number" min="0" step="1" value="0" />
+                    <span class="field-help">0 为不限制；大于 60 日可排除上市初期新股；大于 250 日可排除一年内次新股。</span>
                   </label>
                   <label class="field-label" for="minAvgTurnover20">
                     20日均成交额
@@ -155,6 +156,7 @@
                       <input id="minAvgTurnover20" type="number" min="0" step="1000" value="0" />
                       <span class="unit">万</span>
                     </span>
+                    <span class="field-help">0 为不限制；填 5000 约等于 5000 万，填 10000 约等于 1 亿，可排除低成交额股票。</span>
                   </label>
                   <div class="risk-filter">
                     <div class="field-label">高风险股</div>

@@ -569,21 +569,61 @@ async function loadStockFilterOptions() {
 }
 
 function renderStockFilters() {
-  renderOptionSelect("industryFilter", state.stockFilterOptions.industries || [], "code", "name");
-  renderOptionSelect("conceptFilter", state.stockFilterOptions.concepts || [], "code", "name");
-  renderOptionSelect("marketFilter", state.stockFilterOptions.markets || [], "value", "label");
+  renderCheckboxGroup("industryFilter", state.stockFilterOptions.industries || [], "code", "name");
+  renderCheckboxGroup("conceptFilter", state.stockFilterOptions.concepts || [], "code", "name");
+  renderCheckboxGroup("marketFilter", state.stockFilterOptions.markets || [], "value", "label");
 }
 
-function renderOptionSelect(id, options, valueKey, labelKey) {
-  const select = byId(id);
-  const selected = new Set(Array.from(select.selectedOptions || []).map((option) => option.value));
-  select.innerHTML = options
-    .map((option) => {
-      const value = String(option[valueKey] || "");
-      const selectedText = selected.has(value) ? "selected" : "";
-      return `<option value="${escapeHtml(value)}" ${selectedText}>${escapeHtml(option[labelKey] || value)}</option>`;
-    })
-    .join("");
+function renderCheckboxGroup(id, options, valueKey, labelKey) {
+  const container = byId(id);
+  const previousInputs = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+  const hadRendered = container.dataset.rendered === "1";
+  const selected = new Set(
+    previousInputs
+      .filter((input) => input.checked)
+      .map((input) => input.value),
+  );
+  const defaultChecked = !hadRendered;
+  container.dataset.rendered = "1";
+
+  if (options.length === 0) {
+    container.innerHTML = '<div class="muted filter-empty">暂无可选项</div>';
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="filter-actions">
+      <button type="button" class="mini-button secondary" data-filter-action="all">全选</button>
+      <button type="button" class="mini-button secondary" data-filter-action="none">全不选</button>
+    </div>
+    <div class="filter-option-list">
+      ${options
+        .map((option, index) => {
+          const value = String(option[valueKey] || "");
+          const label = String(option[labelKey] || value);
+          const inputId = `${id}_${index}`;
+          const checked = defaultChecked || selected.has(value) ? "checked" : "";
+          return `
+            <label class="checkbox-row filter-option" for="${escapeHtml(inputId)}">
+              <input id="${escapeHtml(inputId)}" type="checkbox" value="${escapeHtml(value)}" ${checked} />
+              <span>${escapeHtml(label)}</span>
+            </label>
+          `;
+        })
+        .join("")}
+    </div>
+  `;
+  container.querySelectorAll("[data-filter-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      setCheckboxGroupChecked(id, button.dataset.filterAction === "all");
+    });
+  });
+}
+
+function setCheckboxGroupChecked(id, checked) {
+  byId(id).querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    input.checked = checked;
+  });
 }
 
 function selectStrategy(key) {
@@ -799,7 +839,9 @@ function collectStockFilters() {
 }
 
 function selectedValues(id) {
-  return Array.from(byId(id).selectedOptions).map((option) => option.value).filter(Boolean);
+  return Array.from(byId(id).querySelectorAll('input[type="checkbox"]:checked'))
+    .map((input) => input.value)
+    .filter(Boolean);
 }
 
 function readNonNegativeInteger(id) {

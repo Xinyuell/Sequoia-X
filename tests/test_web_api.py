@@ -255,6 +255,16 @@ def test_api_lists_stock_filter_options(tmp_path) -> None:
             VALUES ('IND001', '银行', 'industry', 'test', '2026-05-17T00:00:00')
             """
         )
+        conn.executemany(
+            """
+            INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
+            VALUES (?, ?, 'industry', 'test', '2026-05-17T00:00:00')
+            """,
+            [
+                ("IND_SUB_1", "IT服务Ⅱ"),
+                ("IND_SUB_2", "其他化学制品"),
+            ],
+        )
         conn.execute(
             """
             INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
