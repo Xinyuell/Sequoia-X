@@ -179,6 +179,81 @@ def test_stock_filter_options_include_synced_sub_industry_boards(tmp_path) -> No
     assert {"code": "BK0421", "name": "银行"} in options["industries"]
 
 
+def test_sync_stock_metadata_uses_ths_fallback_for_concepts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import akshare as ak
+
+    engine = DataEngine(
+        Settings(
+            db_path=str(tmp_path / "concept-fallback.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+        )
+    )
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO stock_daily(symbol, date, open, high, low, close, volume, turnover)
+            VALUES ('000001', '2026-01-01', 10, 11, 9, 10.5, 1000, 10500)
+            """
+        )
+        conn.commit()
+
+    monkeypatch.setattr(
+        engine,
+        "sync_stock_basic",
+        lambda: [
+            {
+                "symbol": "000001",
+                "code": "SZ.000001",
+                "name": "Sample Bank",
+                "status": "1",
+                "stock_type": "1",
+                "market": "SZ",
+                "list_date": "1991-04-03",
+                "out_date": "",
+            }
+        ],
+    )
+    monkeypatch.setattr(ak, "stock_board_industry_name_em", lambda: pd.DataFrame())
+    monkeypatch.setattr(
+        ak,
+        "stock_board_industry_name_ths",
+        lambda: pd.DataFrame(),
+    )
+
+    def fail_concept_name_em() -> pd.DataFrame:
+        raise ConnectionError("eastmoney unavailable")
+
+    monkeypatch.setattr(ak, "stock_board_concept_name_em", fail_concept_name_em)
+    monkeypatch.setattr(
+        ak,
+        "stock_board_concept_name_ths",
+        lambda: pd.DataFrame([{"name": "大金融", "code": "308000"}]),
+    )
+    monkeypatch.setattr(
+        engine,
+        "_fetch_ths_board_members",
+        lambda board_type, raw_board_code, board_code, local_symbols: ["000001"],
+    )
+
+    result = engine.sync_stock_metadata()
+
+    with sqlite3.connect(engine.db_path) as conn:
+        concept_boards = conn.execute(
+            "SELECT board_code, board_name FROM stock_boards WHERE board_type = 'concept'"
+        ).fetchall()
+        concept_members = conn.execute(
+            "SELECT symbol, board_code FROM stock_board_members WHERE board_type = 'concept'"
+        ).fetchall()
+
+    assert result["members"] == 1
+    assert concept_boards == [("THS:308000", "大金融")]
+    assert concept_members == [("000001", "THS:308000")]
+
+
 def test_normalize_stock_symbol_handles_common_exchange_formats() -> None:
     assert _normalize_stock_symbol("000001.SZ") == "000001"
     assert _normalize_stock_symbol("SH.600000") == "600000"

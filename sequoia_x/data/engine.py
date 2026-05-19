@@ -1377,15 +1377,20 @@ class DataEngine:
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
         import akshare as ak
 
-        if board_type == "industry":
-            board_df = ak.stock_board_industry_name_em()
-            member_fetcher = ak.stock_board_industry_cons_em
-        else:
-            board_df = ak.stock_board_concept_name_em()
-            member_fetcher = ak.stock_board_concept_cons_em
+        try:
+            if board_type == "industry":
+                board_df = ak.stock_board_industry_name_em()
+                member_fetcher = ak.stock_board_industry_cons_em
+            else:
+                board_df = ak.stock_board_concept_name_em()
+                member_fetcher = ak.stock_board_concept_cons_em
+        except Exception as exc:
+            logger.warning(f"东方财富{_board_type_label(board_type)}板块同步失败，尝试同花顺备用源: {exc}")
+            return self._fetch_ths_boards(board_type, local_symbols, emit)
 
         if board_df is None or board_df.empty:
-            return [], []
+            logger.warning(f"东方财富{_board_type_label(board_type)}板块同步返回空结果，尝试同花顺备用源")
+            return self._fetch_ths_boards(board_type, local_symbols, emit)
 
         boards: list[dict[str, str]] = []
         members: list[dict[str, str]] = []
@@ -1425,7 +1430,141 @@ class DataEngine:
                             "board_name": board_name,
                         }
                     )
+        if boards and not members:
+            logger.warning(f"东方财富{_board_type_label(board_type)}板块无可用成分股，尝试同花顺备用源")
+            fallback_boards, fallback_members = self._fetch_ths_boards(
+                board_type,
+                local_symbols,
+                emit,
+            )
+            if fallback_boards and fallback_members:
+                return fallback_boards, fallback_members
         return boards, members
+
+    def _fetch_ths_boards(
+        self,
+        board_type: str,
+        local_symbols: set[str],
+        emit: Callable[..., None],
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        import akshare as ak
+
+        if board_type == "industry":
+            board_df = ak.stock_board_industry_name_ths()
+        else:
+            board_df = ak.stock_board_concept_name_ths()
+
+        if board_df is None or board_df.empty:
+            return [], []
+
+        boards: list[dict[str, str]] = []
+        members: list[dict[str, str]] = []
+        total = len(board_df)
+        for index, (_, row) in enumerate(board_df.iterrows(), start=1):
+            board_name = _pick_text(row, ["板块名称", "名称", "name"])
+            raw_board_code = _pick_text(row, ["板块代码", "代码", "code"])
+            if not board_name or not raw_board_code:
+                continue
+            board_code = f"THS:{raw_board_code}"
+            emit(
+                f"正在同步{board_name}成分股",
+                total=total,
+                processed=index - 1,
+                current_action="同步同花顺板块成分",
+            )
+            board_members = self._fetch_ths_board_members(
+                board_type,
+                raw_board_code,
+                board_code,
+                local_symbols,
+            )
+            if board_members:
+                boards.append({"board_code": board_code, "board_name": board_name})
+                members.extend(
+                    {
+                        "symbol": symbol,
+                        "board_code": board_code,
+                        "board_name": board_name,
+                    }
+                    for symbol in board_members
+                )
+        return boards, members
+
+    def _fetch_ths_board_members(
+        self,
+        board_type: str,
+        raw_board_code: str,
+        board_code: str,
+        local_symbols: set[str],
+    ) -> list[str]:
+        import re
+        import time
+
+        import requests
+        from bs4 import BeautifulSoup
+
+        path = "thshy" if board_type == "industry" else "gn"
+        referer = f"http://q.10jqka.com.cn/{path}/detail/code/{raw_board_code}/"
+        session = requests.Session()
+        headers = _ths_headers(referer)
+        members: list[str] = []
+        seen: set[str] = set()
+        page = 1
+        page_count = 1
+
+        while page <= page_count and page <= 30:
+            url = (
+                f"http://q.10jqka.com.cn/{path}/detail/code/{raw_board_code}/"
+                f"field/199112/order/desc/page/{page}/ajax/1/"
+            )
+            response = None
+            for attempt in range(3):
+                try:
+                    response = session.get(url, headers=headers, timeout=15)
+                    if response.status_code in {401, 403} and attempt < 2:
+                        headers = _ths_headers(referer)
+                        time.sleep(0.2)
+                        continue
+                    break
+                except requests.RequestException as exc:
+                    if attempt == 2:
+                        logger.warning(f"[{board_code}] 同花顺板块成分同步失败: {exc}")
+                        return members
+                    time.sleep(0.2)
+            if response is None or response.status_code != 200:
+                if response is not None:
+                    logger.warning(f"[{board_code}] 同花顺板块成分同步失败: HTTP {response.status_code}")
+                return members
+
+            response.encoding = "gbk"
+            soup = BeautifulSoup(response.text, features="lxml")
+            table = soup.find("table")
+            if table is None:
+                return members
+
+            headers_text = [item.get_text(strip=True) for item in table.find_all("th")]
+            try:
+                symbol_index = headers_text.index("代码")
+            except ValueError:
+                symbol_index = 1
+
+            for tr in table.find_all("tr")[1:]:
+                cells = [cell.get_text(strip=True) for cell in tr.find_all("td")]
+                if len(cells) <= symbol_index:
+                    continue
+                symbol = _normalize_stock_symbol(cells[symbol_index])
+                if symbol in local_symbols and symbol not in seen:
+                    seen.add(symbol)
+                    members.append(symbol)
+
+            text = soup.get_text(" ", strip=True)
+            page_matches = re.findall(r"(\d+)\s*/\s*(\d+)", text)
+            if page_matches:
+                page_count = int(page_matches[-1][1])
+            page += 1
+            time.sleep(0.05)
+
+        return members
 
     def _write_stock_boards(
         self,
@@ -2067,6 +2206,29 @@ def _normalize_stock_symbol(value: object) -> str:
     if 1 <= len(digits) <= 6:
         return digits.zfill(6)
     return text
+
+
+def _board_type_label(board_type: str) -> str:
+    return "行业" if board_type == "industry" else "概念"
+
+
+def _ths_headers(referer: str) -> dict[str, str]:
+    import py_mini_racer
+
+    from akshare.datasets import get_ths_js
+
+    with open(get_ths_js("ths.js"), encoding="utf-8") as file:
+        js_content = file.read()
+    js_context = py_mini_racer.MiniRacer()
+    js_context.eval(js_content)
+    return {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0 Safari/537.36"
+        ),
+        "Referer": referer,
+        "Cookie": f"v={js_context.call('v')}",
+    }
 
 
 def _market_label(market: str) -> str:
