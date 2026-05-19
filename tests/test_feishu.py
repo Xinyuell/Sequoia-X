@@ -33,8 +33,16 @@ def test_notification_contains_all_symbols(symbols: list[str]) -> None:
     settings = make_settings()
     notifier = FeishuNotifier(settings)
 
-    with patch("requests.post") as mock_post:
-        mock_post.return_value = MagicMock(status_code=200)
+    with (
+        patch.object(
+            FeishuNotifier,
+            "_get_stock_names",
+            return_value={symbol: symbol for symbol in symbols},
+        ),
+        patch("requests.post") as mock_post,
+    ):
+        mock_post.return_value = MagicMock(status_code=200, text='{"code": 0}')
+        mock_post.return_value.json.return_value = {"code": 0}
         notifier.send(symbols=symbols, strategy_name="TestStrategy")
 
     call_args = mock_post.call_args
@@ -54,8 +62,12 @@ def test_notification_uses_config_url(webhook_url: str) -> None:
     settings = make_settings(webhook_url=webhook_url)
     notifier = FeishuNotifier(settings)
 
-    with patch("requests.post") as mock_post:
-        mock_post.return_value = MagicMock(status_code=200)
+    with (
+        patch.object(FeishuNotifier, "_get_stock_names", return_value={"000001": "000001"}),
+        patch("requests.post") as mock_post,
+    ):
+        mock_post.return_value = MagicMock(status_code=200, text='{"code": 0}')
+        mock_post.return_value.json.return_value = {"code": 0}
         notifier.send(symbols=["000001"], strategy_name="Test", webhook_key="default")
 
     called_url = mock_post.call_args.args[0] if mock_post.call_args.args else mock_post.call_args.kwargs.get("url")
@@ -84,8 +96,12 @@ def test_http_failure_logs_error(status_code: int) -> None:
     handler = _ListHandler(_logging.ERROR)
     feishu_logger.addHandler(handler)
     try:
-        with patch("requests.post") as mock_post:
+        with (
+            patch.object(FeishuNotifier, "_get_stock_names", return_value={"000001": "000001"}),
+            patch("requests.post") as mock_post,
+        ):
             mock_post.return_value = MagicMock(status_code=status_code, text="error")
+            mock_post.return_value.json.return_value = {"code": 999}
             notifier.send(symbols=["000001"], strategy_name="Test")
     finally:
         feishu_logger.removeHandler(handler)

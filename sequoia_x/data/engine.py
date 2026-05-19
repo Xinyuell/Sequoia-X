@@ -103,41 +103,6 @@ _CREATE_STOCK_BOARD_MEMBERS_BOARD_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_stock_board_members_board ON stock_board_members (board_type, board_code);
 """
 
-_PRIMARY_INDUSTRY_NAMES = {
-    "农林牧渔",
-    "煤炭",
-    "石油石化",
-    "基础化工",
-    "钢铁",
-    "有色金属",
-    "电子",
-    "家用电器",
-    "食品饮料",
-    "纺织服饰",
-    "轻工制造",
-    "医药生物",
-    "公用事业",
-    "交通运输",
-    "房地产",
-    "商贸零售",
-    "社会服务",
-    "综合",
-    "建筑材料",
-    "建筑装饰",
-    "电力设备",
-    "国防军工",
-    "计算机",
-    "传媒",
-    "通信",
-    "银行",
-    "非银金融",
-    "汽车",
-    "机械设备",
-    "美容护理",
-    "环保",
-}
-
-
 def _latest_weekday_on_or_before(value: date) -> date:
     while value.weekday() >= 5:
         value -= timedelta(days=1)
@@ -1449,10 +1414,9 @@ class DataEngine:
             if member_df is None or member_df.empty:
                 continue
             for _, member_row in member_df.iterrows():
-                symbol = _pick_text(member_row, ["代码", "股票代码", "symbol"])
-                if "." in symbol:
-                    symbol = symbol.split(".")[-1]
-                symbol = symbol.zfill(6) if symbol.isdigit() else symbol
+                symbol = _normalize_stock_symbol(
+                    _pick_text(member_row, ["代码", "股票代码", "symbol"])
+                )
                 if symbol in local_symbols:
                     members.append(
                         {
@@ -1587,7 +1551,7 @@ class DataEngine:
         industries = [
             {"code": row["board_code"], "name": row["board_name"]}
             for row in boards
-            if row["board_type"] == "industry" and row["board_name"] in _PRIMARY_INDUSTRY_NAMES
+            if row["board_type"] == "industry"
         ]
         concepts = [
             {"code": row["board_code"], "name": row["board_name"]}
@@ -2089,6 +2053,20 @@ def _pick_text(row: Any, candidates: list[str]) -> str:
             if text:
                 return text
     return ""
+
+
+def _normalize_stock_symbol(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    parts = text.replace("_", ".").replace("-", ".").split(".")
+    for part in parts:
+        if part.isdigit():
+            return part.zfill(6)
+    digits = "".join(char for char in text if char.isdigit())
+    if 1 <= len(digits) <= 6:
+        return digits.zfill(6)
+    return text
 
 
 def _market_label(market: str) -> str:

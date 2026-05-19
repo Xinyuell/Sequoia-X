@@ -311,7 +311,11 @@ def test_api_lists_stock_filter_options(tmp_path) -> None:
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["industries"] == [{"code": "IND001", "name": "银行"}]
+    assert payload["industries"] == [
+        {"code": "IND_SUB_1", "name": "IT服务Ⅱ"},
+        {"code": "IND_SUB_2", "name": "其他化学制品"},
+        {"code": "IND001", "name": "银行"},
+    ]
     assert payload["concepts"] == [{"code": "CON001", "name": "大金融"}]
     assert {"value": "SZ", "label": "深圳"} in payload["markets"]
 

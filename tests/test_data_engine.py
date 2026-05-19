@@ -10,7 +10,7 @@ from hypothesis import given, settings as h_settings
 from hypothesis import strategies as st
 
 from sequoia_x.core.config import Settings
-from sequoia_x.data.engine import DataEngine
+from sequoia_x.data.engine import DataEngine, _normalize_stock_symbol
 
 
 def make_engine_in(tmp_dir: str) -> tuple[DataEngine, Settings]:
@@ -148,3 +148,38 @@ def test_sync_stock_metadata_preserves_cached_boards_when_upstream_empty(
     assert result["local_symbols"] == 1
     assert board_count == 1
     assert member_count == 1
+
+
+def test_stock_filter_options_include_synced_sub_industry_boards(tmp_path) -> None:
+    engine = DataEngine(
+        Settings(
+            db_path=str(tmp_path / "industry-filter.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+        )
+    )
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
+            VALUES ('BK1036', '半导体', 'industry', 'test', '2026-05-19T00:00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
+            VALUES ('BK0421', '银行', 'industry', 'test', '2026-05-19T00:00:00')
+            """
+        )
+        conn.commit()
+
+    options = engine.list_stock_filter_options()
+
+    assert {"code": "BK1036", "name": "半导体"} in options["industries"]
+    assert {"code": "BK0421", "name": "银行"} in options["industries"]
+
+
+def test_normalize_stock_symbol_handles_common_exchange_formats() -> None:
+    assert _normalize_stock_symbol("000001.SZ") == "000001"
+    assert _normalize_stock_symbol("SH.600000") == "600000"
+    assert _normalize_stock_symbol("300750") == "300750"

@@ -1450,6 +1450,7 @@ function formatJobResult(result) {
     basic_records: "基础资料",
     boards: "板块数",
     members: "成分关系",
+    board_failures: "板块失败数",
     start_date: "起始日期",
     end_date: "结束日期",
     full_refresh: "强制重拉",
