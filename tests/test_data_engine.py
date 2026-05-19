@@ -135,7 +135,7 @@ def test_sync_stock_metadata_preserves_cached_boards_when_upstream_empty(
     )
     monkeypatch.setattr(
         engine,
-        "_fetch_akshare_boards",
+        "_fetch_board_metadata",
         lambda board_type, local_symbols, emit: ([], []),
     )
 
@@ -179,17 +179,22 @@ def test_stock_filter_options_include_synced_sub_industry_boards(tmp_path) -> No
     assert {"code": "BK0421", "name": "银行"} in options["industries"]
 
 
-def test_sync_stock_metadata_uses_ths_fallback_for_concepts(
+def test_sync_stock_metadata_imports_local_board_mapping(
     tmp_path,
     monkeypatch,
 ) -> None:
-    import akshare as ak
-
+    mapping_path = tmp_path / "stock_board_mapping.csv"
+    mapping_path.write_text(
+        "symbol,name,一级行业,概念\n"
+        "000001,Sample Bank,银行,大金融;低价股\n",
+        encoding="utf-8",
+    )
     engine = DataEngine(
         Settings(
-            db_path=str(tmp_path / "concept-fallback.db"),
+            db_path=str(tmp_path / "local-board-mapping.db"),
             start_date="2024-01-01",
             feishu_webhook_url="https://example.com/hook",
+            board_mapping_path=str(mapping_path),
         )
     )
     with sqlite3.connect(engine.db_path) as conn:
@@ -217,27 +222,87 @@ def test_sync_stock_metadata_uses_ths_fallback_for_concepts(
             }
         ],
     )
-    monkeypatch.setattr(ak, "stock_board_industry_name_em", lambda: pd.DataFrame())
-    monkeypatch.setattr(
-        ak,
-        "stock_board_industry_name_ths",
-        lambda: pd.DataFrame(),
-    )
-
-    def fail_concept_name_em() -> pd.DataFrame:
-        raise ConnectionError("eastmoney unavailable")
-
-    monkeypatch.setattr(ak, "stock_board_concept_name_em", fail_concept_name_em)
-    monkeypatch.setattr(
-        ak,
-        "stock_board_concept_name_ths",
-        lambda: pd.DataFrame([{"name": "大金融", "code": "308000"}]),
-    )
     monkeypatch.setattr(
         engine,
-        "_fetch_ths_board_members",
-        lambda board_type, raw_board_code, board_code, local_symbols: ["000001"],
+        "_fetch_tushare_boards",
+        lambda board_type, local_symbols, emit: (_ for _ in ()).throw(
+            AssertionError("local mapping should be used first")
+        ),
     )
+
+    result = engine.sync_stock_metadata()
+
+    with sqlite3.connect(engine.db_path) as conn:
+        boards = conn.execute(
+            "SELECT board_name, board_type FROM stock_boards ORDER BY board_type, board_name"
+        ).fetchall()
+        members = conn.execute(
+            "SELECT symbol, board_name, board_type FROM stock_board_members "
+            "ORDER BY board_type, board_name"
+        ).fetchall()
+
+    assert result["boards"] == 3
+    assert result["members"] == 3
+    assert boards == [("低价股", "concept"), ("大金融", "concept"), ("银行", "industry")]
+    assert members == [
+        ("000001", "低价股", "concept"),
+        ("000001", "大金融", "concept"),
+        ("000001", "银行", "industry"),
+    ]
+
+
+def test_sync_stock_metadata_uses_tushare_concepts_when_no_local_mapping(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    class FakePro:
+        def index_classify(self, **kwargs):
+            return pd.DataFrame()
+
+        def stock_basic(self, **kwargs):
+            return pd.DataFrame()
+
+        def concept(self, **kwargs):
+            return pd.DataFrame([{"code": "TS2", "name": "大金融"}])
+
+        def concept_detail(self, **kwargs):
+            return pd.DataFrame([{"ts_code": "000001.SZ", "name": "Sample Bank"}])
+
+    engine = DataEngine(
+        Settings(
+            db_path=str(tmp_path / "tushare-concept.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+            tushare_token="test-token",
+            board_mapping_path=str(tmp_path / "missing.csv"),
+        )
+    )
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO stock_daily(symbol, date, open, high, low, close, volume, turnover)
+            VALUES ('000001', '2026-01-01', 10, 11, 9, 10.5, 1000, 10500)
+            """
+        )
+        conn.commit()
+
+    monkeypatch.setattr(
+        engine,
+        "sync_stock_basic",
+        lambda: [
+            {
+                "symbol": "000001",
+                "code": "SZ.000001",
+                "name": "Sample Bank",
+                "status": "1",
+                "stock_type": "1",
+                "market": "SZ",
+                "list_date": "1991-04-03",
+                "out_date": "",
+            }
+        ],
+    )
+    monkeypatch.setattr(engine, "_get_ts_pro", lambda: FakePro())
 
     result = engine.sync_stock_metadata()
 
@@ -250,8 +315,8 @@ def test_sync_stock_metadata_uses_ths_fallback_for_concepts(
         ).fetchall()
 
     assert result["members"] == 1
-    assert concept_boards == [("THS:308000", "大金融")]
-    assert concept_members == [("000001", "THS:308000")]
+    assert concept_boards == [("TS:TS2", "大金融")]
+    assert concept_members == [("000001", "TS:TS2")]
 
 
 def test_normalize_stock_symbol_handles_common_exchange_formats() -> None:

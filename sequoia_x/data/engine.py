@@ -316,6 +316,7 @@ class DataEngine:
         self.db_path: str = settings.db_path
         self.start_date: str = settings.start_date
         self.tushare_token: str = settings.tushare_token
+        self.board_mapping_path: str = settings.board_mapping_path
         self._ts_pro = None
         self._init_db()
 
@@ -1321,7 +1322,7 @@ class DataEngine:
         for board_type in ("industry", "concept"):
             board_label = "行业" if board_type == "industry" else "概念"
             try:
-                boards, members = self._fetch_akshare_boards(board_type, local_symbols, emit)
+                boards, members = self._fetch_board_metadata(board_type, local_symbols, emit)
             except Exception as exc:
                 board_failures += 1
                 logger.warning(f"{board_label}板块同步失败，保留本地缓存: {exc}")
@@ -1369,91 +1370,203 @@ class DataEngine:
             "board_failures": board_failures,
         }
 
-    def _fetch_akshare_boards(
+    def _fetch_board_metadata(
         self,
         board_type: str,
         local_symbols: set[str],
         emit: Callable[..., None],
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        import akshare as ak
+        boards, members = self._fetch_local_board_mapping(board_type, local_symbols)
+        if boards and members:
+            emit(
+                f"已读取本地{_board_type_label(board_type)}映射",
+                current_action="读取本地板块映射",
+                boards=len(boards),
+                members=len(members),
+            )
+            return boards, members
+        return self._fetch_tushare_boards(board_type, local_symbols, emit)
+
+    def _fetch_local_board_mapping(
+        self,
+        board_type: str,
+        local_symbols: set[str],
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        path = Path(self.board_mapping_path)
+        if not path.exists():
+            return [], []
 
         try:
-            if board_type == "industry":
-                board_df = ak.stock_board_industry_name_em()
-                member_fetcher = ak.stock_board_industry_cons_em
-            else:
-                board_df = ak.stock_board_concept_name_em()
-                member_fetcher = ak.stock_board_concept_cons_em
+            df = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            df = pd.read_csv(path, dtype=str, encoding="gbk")
         except Exception as exc:
-            logger.warning(f"东方财富{_board_type_label(board_type)}板块同步失败，尝试同花顺备用源: {exc}")
-            return self._fetch_ths_boards(board_type, local_symbols, emit)
+            logger.warning(f"本地板块映射读取失败: {path} {exc}")
+            return [], []
+
+        symbol_col = _find_column(df, ["symbol", "股票代码", "代码", "ts_code", "证券代码"])
+        if board_type == "industry":
+            board_col = _find_column(
+                df,
+                ["industry_board_name", "industry", "一级行业", "行业", "申万一级行业"],
+            )
+        else:
+            board_col = _find_column(
+                df,
+                [
+                    "concept_board_names",
+                    "concept_board_names_json",
+                    "concepts",
+                    "概念板块",
+                    "概念",
+                ],
+            )
+        if not symbol_col or not board_col:
+            return [], []
+
+        boards_by_code: dict[str, str] = {}
+        member_keys: set[tuple[str, str]] = set()
+        members: list[dict[str, str]] = []
+        for _, row in df.iterrows():
+            symbol = _normalize_stock_symbol(row.get(symbol_col))
+            if symbol not in local_symbols:
+                continue
+            for board_name in _split_board_names(row.get(board_col)):
+                board_code = _stable_board_code(board_type, board_name)
+                boards_by_code[board_code] = board_name
+                key = (symbol, board_code)
+                if key in member_keys:
+                    continue
+                member_keys.add(key)
+                members.append(
+                    {
+                        "symbol": symbol,
+                        "board_code": board_code,
+                        "board_name": board_name,
+                    }
+                )
+        boards = [
+            {"board_code": board_code, "board_name": board_name}
+            for board_code, board_name in sorted(boards_by_code.items(), key=lambda item: item[1])
+        ]
+        return boards, members
+
+    def _fetch_tushare_boards(
+        self,
+        board_type: str,
+        local_symbols: set[str],
+        emit: Callable[..., None],
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        pro = self._get_ts_pro()
+        if pro is None:
+            logger.warning(f"未配置 TUSHARE_TOKEN，无法同步{_board_type_label(board_type)}板块")
+            return [], []
+        if board_type == "industry":
+            return self._fetch_tushare_industries(pro, local_symbols, emit)
+        return self._fetch_tushare_concepts(pro, local_symbols, emit)
+
+    def _fetch_tushare_industries(
+        self,
+        pro: Any,
+        local_symbols: set[str],
+        emit: Callable[..., None],
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        try:
+            board_df = pro.index_classify(level="L1", src="SW2021")
+        except Exception as exc:
+            logger.warning(f"Tushare 申万一级行业同步失败，尝试 stock_basic 行业字段: {exc}")
+            return self._fetch_tushare_stock_basic_industries(pro, local_symbols)
 
         if board_df is None or board_df.empty:
-            logger.warning(f"东方财富{_board_type_label(board_type)}板块同步返回空结果，尝试同花顺备用源")
-            return self._fetch_ths_boards(board_type, local_symbols, emit)
+            return self._fetch_tushare_stock_basic_industries(pro, local_symbols)
 
         boards: list[dict[str, str]] = []
         members: list[dict[str, str]] = []
         total = len(board_df)
         for index, (_, row) in enumerate(board_df.iterrows(), start=1):
-            board_name = _pick_text(row, ["板块名称", "名称", "name"])
-            board_code = _pick_text(row, ["板块代码", "代码", "code"]) or board_name
-            if not board_name:
+            board_code = _pick_text(row, ["index_code", "industry_code", "code"])
+            board_name = _pick_text(row, ["industry_name", "name", "板块名称"])
+            if not board_code or not board_name:
                 continue
+            board_code = f"TS:{board_code}"
             emit(
                 f"正在同步{board_name}成分股",
                 total=total,
                 processed=index - 1,
-                current_action="同步板块成分",
+                current_action="同步 Tushare 行业成分",
             )
-            boards.append({"board_code": board_code, "board_name": board_name})
             try:
-                member_df = member_fetcher(symbol=board_name)
-            except TypeError:
-                member_df = member_fetcher(symbol=board_code)
+                member_df = pro.index_member(index_code=board_code.removeprefix("TS:"))
             except Exception as exc:
-                logger.warning(f"[{board_name}] 板块成分同步失败: {exc}")
+                logger.warning(f"[{board_name}] Tushare 行业成分同步失败: {exc}")
                 continue
-            except BaseException:
-                raise
-            if member_df is None or member_df.empty:
-                continue
-            for _, member_row in member_df.iterrows():
-                symbol = _normalize_stock_symbol(
-                    _pick_text(member_row, ["代码", "股票代码", "symbol"])
+            boards.append({"board_code": board_code, "board_name": board_name})
+            members.extend(
+                _board_members_from_df(
+                    member_df,
+                    board_code,
+                    board_name,
+                    local_symbols,
+                    ["con_code", "ts_code", "symbol", "代码"],
                 )
-                if symbol in local_symbols:
-                    members.append(
-                        {
-                            "symbol": symbol,
-                            "board_code": board_code,
-                            "board_name": board_name,
-                        }
-                    )
-        if boards and not members:
-            logger.warning(f"东方财富{_board_type_label(board_type)}板块无可用成分股，尝试同花顺备用源")
-            fallback_boards, fallback_members = self._fetch_ths_boards(
-                board_type,
-                local_symbols,
-                emit,
             )
-            if fallback_boards and fallback_members:
-                return fallback_boards, fallback_members
         return boards, members
 
-    def _fetch_ths_boards(
+    def _fetch_tushare_stock_basic_industries(
         self,
-        board_type: str,
+        pro: Any,
+        local_symbols: set[str],
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        try:
+            df = pro.stock_basic(
+                exchange="",
+                list_status="L",
+                fields="ts_code,symbol,name,industry",
+            )
+        except Exception as exc:
+            logger.warning(f"Tushare stock_basic 行业字段同步失败: {exc}")
+            return [], []
+        if df is None or df.empty:
+            return [], []
+
+        boards_by_code: dict[str, str] = {}
+        members: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for _, row in df.iterrows():
+            symbol = _normalize_stock_symbol(_pick_text(row, ["symbol", "ts_code"]))
+            board_name = _pick_text(row, ["industry"])
+            if symbol not in local_symbols or not board_name:
+                continue
+            board_code = _stable_board_code("industry", board_name)
+            boards_by_code[board_code] = board_name
+            key = (symbol, board_code)
+            if key in seen:
+                continue
+            seen.add(key)
+            members.append(
+                {
+                    "symbol": symbol,
+                    "board_code": board_code,
+                    "board_name": board_name,
+                }
+            )
+        boards = [
+            {"board_code": board_code, "board_name": board_name}
+            for board_code, board_name in sorted(boards_by_code.items(), key=lambda item: item[1])
+        ]
+        return boards, members
+
+    def _fetch_tushare_concepts(
+        self,
+        pro: Any,
         local_symbols: set[str],
         emit: Callable[..., None],
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        import akshare as ak
-
-        if board_type == "industry":
-            board_df = ak.stock_board_industry_name_ths()
-        else:
-            board_df = ak.stock_board_concept_name_ths()
-
+        try:
+            board_df = pro.concept(src="ts")
+        except Exception as exc:
+            logger.warning(f"Tushare 概念板块同步失败: {exc}")
+            return [], []
         if board_df is None or board_df.empty:
             return [], []
 
@@ -1461,110 +1574,33 @@ class DataEngine:
         members: list[dict[str, str]] = []
         total = len(board_df)
         for index, (_, row) in enumerate(board_df.iterrows(), start=1):
-            board_name = _pick_text(row, ["板块名称", "名称", "name"])
-            raw_board_code = _pick_text(row, ["板块代码", "代码", "code"])
-            if not board_name or not raw_board_code:
+            raw_board_code = _pick_text(row, ["code", "id", "concept_id"])
+            board_name = _pick_text(row, ["name", "concept_name", "板块名称"])
+            if not raw_board_code or not board_name:
                 continue
-            board_code = f"THS:{raw_board_code}"
+            board_code = f"TS:{raw_board_code}"
             emit(
                 f"正在同步{board_name}成分股",
                 total=total,
                 processed=index - 1,
-                current_action="同步同花顺板块成分",
+                current_action="同步 Tushare 概念成分",
             )
-            board_members = self._fetch_ths_board_members(
-                board_type,
-                raw_board_code,
+            try:
+                member_df = pro.concept_detail(id=raw_board_code)
+            except Exception as exc:
+                logger.warning(f"[{board_name}] Tushare 概念成分同步失败: {exc}")
+                continue
+            board_members = _board_members_from_df(
+                member_df,
                 board_code,
+                board_name,
                 local_symbols,
+                ["ts_code", "symbol", "代码"],
             )
             if board_members:
                 boards.append({"board_code": board_code, "board_name": board_name})
-                members.extend(
-                    {
-                        "symbol": symbol,
-                        "board_code": board_code,
-                        "board_name": board_name,
-                    }
-                    for symbol in board_members
-                )
+                members.extend(board_members)
         return boards, members
-
-    def _fetch_ths_board_members(
-        self,
-        board_type: str,
-        raw_board_code: str,
-        board_code: str,
-        local_symbols: set[str],
-    ) -> list[str]:
-        import re
-        import time
-
-        import requests
-        from bs4 import BeautifulSoup
-
-        path = "thshy" if board_type == "industry" else "gn"
-        referer = f"http://q.10jqka.com.cn/{path}/detail/code/{raw_board_code}/"
-        session = requests.Session()
-        headers = _ths_headers(referer)
-        members: list[str] = []
-        seen: set[str] = set()
-        page = 1
-        page_count = 1
-
-        while page <= page_count and page <= 30:
-            url = (
-                f"http://q.10jqka.com.cn/{path}/detail/code/{raw_board_code}/"
-                f"field/199112/order/desc/page/{page}/ajax/1/"
-            )
-            response = None
-            for attempt in range(3):
-                try:
-                    response = session.get(url, headers=headers, timeout=15)
-                    if response.status_code in {401, 403} and attempt < 2:
-                        headers = _ths_headers(referer)
-                        time.sleep(0.2)
-                        continue
-                    break
-                except requests.RequestException as exc:
-                    if attempt == 2:
-                        logger.warning(f"[{board_code}] 同花顺板块成分同步失败: {exc}")
-                        return members
-                    time.sleep(0.2)
-            if response is None or response.status_code != 200:
-                if response is not None:
-                    logger.warning(f"[{board_code}] 同花顺板块成分同步失败: HTTP {response.status_code}")
-                return members
-
-            response.encoding = "gbk"
-            soup = BeautifulSoup(response.text, features="lxml")
-            table = soup.find("table")
-            if table is None:
-                return members
-
-            headers_text = [item.get_text(strip=True) for item in table.find_all("th")]
-            try:
-                symbol_index = headers_text.index("代码")
-            except ValueError:
-                symbol_index = 1
-
-            for tr in table.find_all("tr")[1:]:
-                cells = [cell.get_text(strip=True) for cell in tr.find_all("td")]
-                if len(cells) <= symbol_index:
-                    continue
-                symbol = _normalize_stock_symbol(cells[symbol_index])
-                if symbol in local_symbols and symbol not in seen:
-                    seen.add(symbol)
-                    members.append(symbol)
-
-            text = soup.get_text(" ", strip=True)
-            page_matches = re.findall(r"(\d+)\s*/\s*(\d+)", text)
-            if page_matches:
-                page_count = int(page_matches[-1][1])
-            page += 1
-            time.sleep(0.05)
-
-        return members
 
     def _write_stock_boards(
         self,
@@ -1577,7 +1613,7 @@ class DataEngine:
             conn.executemany(
                 """
                 INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
-                VALUES (?, ?, ?, 'akshare_em', ?)
+                VALUES (?, ?, ?, 'board_mapping', ?)
                 ON CONFLICT(board_type, board_code) DO UPDATE SET
                     board_name = excluded.board_name,
                     source = excluded.source,
@@ -1593,7 +1629,7 @@ class DataEngine:
                 """
                 INSERT OR REPLACE INTO stock_board_members
                     (symbol, board_code, board_type, board_name, source, fetched_at)
-                VALUES (?, ?, ?, ?, 'akshare_em', ?)
+                VALUES (?, ?, ?, ?, 'board_mapping', ?)
                 """,
                 [
                     (
@@ -2212,23 +2248,69 @@ def _board_type_label(board_type: str) -> str:
     return "行业" if board_type == "industry" else "概念"
 
 
-def _ths_headers(referer: str) -> dict[str, str]:
-    import py_mini_racer
+def _find_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    normalized = {str(column).strip().lower(): column for column in df.columns}
+    for candidate in candidates:
+        column = normalized.get(candidate.strip().lower())
+        if column is not None:
+            return str(column)
+    return None
 
-    from akshare.datasets import get_ths_js
 
-    with open(get_ths_js("ths.js"), encoding="utf-8") as file:
-        js_content = file.read()
-    js_context = py_mini_racer.MiniRacer()
-    js_context.eval(js_content)
-    return {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0 Safari/537.36"
-        ),
-        "Referer": referer,
-        "Cookie": f"v={js_context.call('v')}",
-    }
+def _split_board_names(value: object) -> list[str]:
+    import re
+
+    if value is None or pd.isna(value):
+        return []
+    text = str(value).strip()
+    if not text or text in {"None", "nan", "NaT", "[]"}:
+        return []
+    if text.startswith("["):
+        try:
+            decoded = json.loads(text)
+            if isinstance(decoded, list):
+                return [str(item).strip() for item in decoded if str(item).strip()]
+        except json.JSONDecodeError:
+            pass
+    parts = re.split(r"[,，;；|、/]\s*", text)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _stable_board_code(board_type: str, board_name: str) -> str:
+    import hashlib
+
+    prefix = "LOCAL:IND" if board_type == "industry" else "LOCAL:CON"
+    digest = hashlib.sha1(board_name.encode("utf-8")).hexdigest()[:10]
+    return f"{prefix}:{digest}"
+
+
+def _board_members_from_df(
+    df: pd.DataFrame | None,
+    board_code: str,
+    board_name: str,
+    local_symbols: set[str],
+    symbol_columns: list[str],
+) -> list[dict[str, str]]:
+    if df is None or df.empty:
+        return []
+    members: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for _, row in df.iterrows():
+        out_date = _pick_text(row, ["out_date", "OUT_DATE", "退市日期"])
+        if out_date and out_date not in {"None", "nan", "NaT"}:
+            continue
+        symbol = _normalize_stock_symbol(_pick_text(row, symbol_columns))
+        if symbol not in local_symbols or symbol in seen:
+            continue
+        seen.add(symbol)
+        members.append(
+            {
+                "symbol": symbol,
+                "board_code": board_code,
+                "board_name": board_name,
+            }
+        )
+    return members
 
 
 def _market_label(market: str) -> str:

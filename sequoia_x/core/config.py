@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     feishu_webhook_url: str  # 必填字段，缺失时抛出 ValidationError
     strategy_webhooks: dict[str, str] = {}
     tushare_token: str = ""
+    board_mapping_path: str = "data/stock_board_mapping.csv"
 
     model_config = SettingsConfigDict(
         env_file=".env",
