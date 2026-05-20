@@ -1,6 +1,7 @@
 """数据引擎模块：负责 SQLite 行情数据存储与 baostock 增量同步。"""
 
 import json
+import re
 import sqlite3
 from collections.abc import Callable
 from datetime import datetime, date, timedelta
@@ -13,6 +14,10 @@ from sequoia_x.core.config import Settings
 from sequoia_x.core.logger import get_logger
 
 logger = get_logger(__name__)
+
+_JQDATA_ALLOWED_DATE_RANGE_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2})\D+(\d{4}-\d{2}-\d{2})"
+)
 
 
 _CREATE_TABLE_SQL = """
@@ -320,6 +325,8 @@ class DataEngine:
         self.jqdata_password: str = settings.jqdata_password
         self.jqdata_industry: str = settings.jqdata_industry
         self._ts_pro = None
+        self._jqdata_allowed_date_range: tuple[date, date] | None = None
+        self._jqdata_date_range_notice_emitted = False
         self._init_db()
 
     def _init_db(self) -> None:
@@ -1309,6 +1316,8 @@ class DataEngine:
         local_symbols = set(self.get_local_symbols())
         if not local_symbols:
             return {"local_symbols": 0, "boards": 0, "members": 0}
+        self._jqdata_allowed_date_range = None
+        self._jqdata_date_range_notice_emitted = False
 
         def emit(message: str, **kwargs: Any) -> None:
             if progress_callback is not None:
@@ -1321,12 +1330,14 @@ class DataEngine:
         board_count = 0
         member_count = 0
         board_failures = 0
+        board_errors: list[str] = []
         for board_type in ("industry", "concept"):
             board_label = "行业" if board_type == "industry" else "概念"
             try:
                 boards, members = self._fetch_board_metadata(board_type, local_symbols, emit)
             except Exception as exc:
                 board_failures += 1
+                board_errors.append(f"{board_label}: {exc}")
                 logger.warning(f"{board_label}板块同步失败，保留本地缓存: {exc}")
                 emit(
                     f"{board_label}板块同步失败，已保留本地缓存",
@@ -1335,11 +1346,15 @@ class DataEngine:
                     boards=board_count,
                     members=member_count,
                     board_failures=board_failures,
+                    board_errors=board_errors,
                     current_action="保留板块缓存",
                 )
                 continue
             if not boards or not members:
                 board_failures += 1
+                board_errors.append(
+                    f"{board_label}: board result empty boards={len(boards)}, members={len(members)}"
+                )
                 logger.warning(f"{board_label}板块同步返回空结果，保留本地缓存")
                 emit(
                     f"{board_label}板块同步返回空结果，已保留本地缓存",
@@ -1348,6 +1363,7 @@ class DataEngine:
                     boards=board_count,
                     members=member_count,
                     board_failures=board_failures,
+                    board_errors=board_errors,
                     current_action="保留板块缓存",
                 )
                 continue
@@ -1361,6 +1377,7 @@ class DataEngine:
                 boards=board_count,
                 members=member_count,
                 board_failures=board_failures,
+                board_errors=board_errors,
             )
 
         self._refresh_stock_basic_board_cache()
@@ -1370,6 +1387,7 @@ class DataEngine:
             "boards": board_count,
             "members": member_count,
             "board_failures": board_failures,
+            "board_errors": board_errors,
         }
 
     def _fetch_board_metadata(
@@ -1379,28 +1397,65 @@ class DataEngine:
         emit: Callable[..., None],
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
         jq = self._get_jqdata_client()
-        if jq is None:
-            return [], []
-        reference_date = self._latest_local_date()
+        reference_date = _parse_iso_date(self._latest_local_date())
         if board_type == "industry":
             return self._fetch_jqdata_industries(jq, local_symbols, emit, reference_date)
         return self._fetch_jqdata_concepts(jq, local_symbols, emit, reference_date)
 
-    def _get_jqdata_client(self) -> Any | None:
+    def _get_jqdata_client(self) -> Any:
         if not self.jqdata_username or not self.jqdata_password:
-            logger.warning("未配置 JQDATA_USERNAME/JQDATA_PASSWORD，无法同步行业和概念板块")
-            return None
+            message = "未配置 JQDATA_USERNAME/JQDATA_PASSWORD，无法同步行业和概念板块"
+            logger.warning(message)
+            raise RuntimeError(message)
         try:
             import jqdatasdk as jq
         except ImportError as exc:
-            logger.warning(f"未安装 jqdatasdk，无法同步 JoinQuant 板块数据: {exc}")
-            return None
+            message = f"未安装 jqdatasdk，无法同步 JoinQuant 板块数据: {exc}"
+            logger.warning(message)
+            raise RuntimeError(message) from exc
         try:
             jq.auth(self.jqdata_username, self.jqdata_password)
         except Exception as exc:
-            logger.warning(f"JoinQuant 登录失败: {exc}")
-            return None
+            message = f"JoinQuant 登录失败: {exc}"
+            logger.warning(message)
+            raise RuntimeError(message) from exc
         return jq
+
+    def _jqdata_date_for_request(self, requested_date: date | None) -> date | None:
+        if self._jqdata_allowed_date_range is None:
+            return requested_date
+        fallback_date = _clamp_date(requested_date, self._jqdata_allowed_date_range)
+        if fallback_date != requested_date and not self._jqdata_date_range_notice_emitted:
+            start, end = self._jqdata_allowed_date_range
+            logger.info(
+                "JQData 查询日期 %s 超出账号权限范围 %s 至 %s，自动改用 %s",
+                requested_date.isoformat() if requested_date else "默认日期",
+                start.isoformat(),
+                end.isoformat(),
+                fallback_date.isoformat(),
+            )
+            self._jqdata_date_range_notice_emitted = True
+        return fallback_date
+
+    def _call_jqdata_with_date_fallback(
+        self,
+        label: str,
+        requested_date: date | None,
+        fetcher: Callable[[date | None], Any],
+    ) -> Any:
+        effective_date = self._jqdata_date_for_request(requested_date)
+        try:
+            return fetcher(effective_date)
+        except Exception as exc:
+            allowed_range = _jqdata_allowed_date_range_from_error(exc)
+            if allowed_range is None:
+                raise
+            self._jqdata_allowed_date_range = allowed_range
+            fallback_date = self._jqdata_date_for_request(requested_date)
+            if fallback_date == effective_date:
+                raise
+            logger.info("%s 超出 JQData 账号日期权限，改用 %s 重试", label, fallback_date)
+            return fetcher(fallback_date)
 
     def _latest_local_date(self) -> str | None:
         with sqlite3.connect(self.db_path) as conn:
@@ -1412,13 +1467,20 @@ class DataEngine:
         jq: Any,
         local_symbols: set[str],
         emit: Callable[..., None],
-        reference_date: str | None,
+        reference_date: date | None,
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
         try:
-            board_df = jq.get_industries(name=self.jqdata_industry)
+            board_df = self._call_jqdata_with_date_fallback(
+                "JoinQuant 一级行业列表",
+                reference_date,
+                lambda query_date: jq.get_industries(
+                    name=self.jqdata_industry,
+                    date=query_date,
+                ),
+            )
         except Exception as exc:
             logger.warning(f"JoinQuant 一级行业列表同步失败: {exc}")
-            return [], []
+            raise RuntimeError(f"JoinQuant 一级行业列表同步失败: {exc}") from exc
 
         boards: list[dict[str, str]] = []
         members: list[dict[str, str]] = []
@@ -1439,7 +1501,14 @@ class DataEngine:
                 current_action="同步 JoinQuant 一级行业成分",
             )
             try:
-                stock_codes = jq.get_industry_stocks(raw_board_code, date=reference_date)
+                stock_codes = self._call_jqdata_with_date_fallback(
+                    f"JoinQuant 行业成分 {board_name}",
+                    reference_date,
+                    lambda query_date: jq.get_industry_stocks(
+                        raw_board_code,
+                        date=query_date,
+                    ),
+                )
             except Exception as exc:
                 logger.warning(f"[{board_name}] JoinQuant 行业成分同步失败: {exc}")
                 continue
@@ -1459,13 +1528,13 @@ class DataEngine:
         jq: Any,
         local_symbols: set[str],
         emit: Callable[..., None],
-        reference_date: str | None,
+        reference_date: date | None,
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
         try:
             board_df = jq.get_concepts()
         except Exception as exc:
             logger.warning(f"JoinQuant 概念板块列表同步失败: {exc}")
-            return [], []
+            raise RuntimeError(f"JoinQuant 概念板块列表同步失败: {exc}") from exc
 
         boards: list[dict[str, str]] = []
         members: list[dict[str, str]] = []
@@ -1486,7 +1555,14 @@ class DataEngine:
                 current_action="同步 JoinQuant 概念成分",
             )
             try:
-                stock_codes = jq.get_concept_stocks(raw_board_code, date=reference_date)
+                stock_codes = self._call_jqdata_with_date_fallback(
+                    f"JoinQuant 概念成分 {board_name}",
+                    reference_date,
+                    lambda query_date: jq.get_concept_stocks(
+                        raw_board_code,
+                        date=query_date,
+                    ),
+                )
             except Exception as exc:
                 logger.warning(f"[{board_name}] JoinQuant 概念成分同步失败: {exc}")
                 continue
@@ -1509,6 +1585,8 @@ class DataEngine:
     ) -> None:
         fetched_at = datetime.now().isoformat(timespec="seconds")
         with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM stock_boards WHERE board_type = ?", (board_type,))
+            conn.execute("DELETE FROM stock_board_members WHERE board_type = ?", (board_type,))
             conn.executemany(
                 """
                 INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
@@ -1523,7 +1601,6 @@ class DataEngine:
                     for board in boards
                 ],
             )
-            conn.execute("DELETE FROM stock_board_members WHERE board_type = ?", (board_type,))
             conn.executemany(
                 """
                 INSERT OR REPLACE INTO stock_board_members
@@ -1573,6 +1650,17 @@ class DataEngine:
                 item["names"].append(row["board_name"])
 
             updated_at = datetime.now().isoformat(timespec="seconds")
+            conn.execute(
+                """
+                UPDATE stock_basic
+                SET industry_board_code = NULL,
+                    industry_board_name = NULL,
+                    concept_board_codes_json = NULL,
+                    concept_board_names_json = NULL,
+                    board_updated_at = ?
+                """,
+                (updated_at,),
+            )
             for symbol, (board_code, board_name) in industry_map.items():
                 conn.execute(
                     """
@@ -2114,6 +2202,42 @@ def _format_compact_date(value: object) -> str:
     if len(text) == 8 and text.isdigit():
         return f"{text[0:4]}-{text[4:6]}-{text[6:8]}"
     return text
+
+
+def _parse_iso_date(value: object) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = _format_compact_date(value)
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
+def _jqdata_allowed_date_range_from_error(exc: Exception) -> tuple[date, date] | None:
+    match = _JQDATA_ALLOWED_DATE_RANGE_RE.search(str(exc))
+    if match is None:
+        return None
+    start = _parse_iso_date(match.group(1))
+    end = _parse_iso_date(match.group(2))
+    if start is None or end is None:
+        return None
+    return start, end
+
+
+def _clamp_date(value: date | None, allowed_range: tuple[date, date]) -> date:
+    start, end = allowed_range
+    if value is None:
+        return end
+    if value < start:
+        return start
+    if value > end:
+        return end
+    return value
 
 
 def _pick_text(row: Any, candidates: list[str]) -> str:

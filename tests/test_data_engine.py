@@ -183,20 +183,23 @@ def test_sync_stock_metadata_imports_jqdata_industries_and_concepts(
     tmp_path,
     monkeypatch,
 ) -> None:
+    date_cls = date
+
     class FakeJQData:
         def __init__(self) -> None:
             self.industry_name = ""
 
-        def get_industries(self, name: str):
+        def get_industries(self, name: str, date: date | None = None):
             self.industry_name = name
+            assert date == date_cls(2026, 1, 2)
             return pd.DataFrame(
                 [{"name": "金融", "start_date": "2005-01-01"}],
                 index=["HY001"],
             )
 
-        def get_industry_stocks(self, code: str, date: str | None = None):
+        def get_industry_stocks(self, code: str, date: date | None = None):
             assert code == "HY001"
-            assert date == "2026-01-02"
+            assert date == date_cls(2026, 1, 2)
             return ["000001.XSHE", "600000.XSHG"]
 
         def get_concepts(self):
@@ -205,8 +208,8 @@ def test_sync_stock_metadata_imports_jqdata_industries_and_concepts(
                 index=["GN001", "GN002"],
             )
 
-        def get_concept_stocks(self, code: str, date: str | None = None):
-            assert date == "2026-01-02"
+        def get_concept_stocks(self, code: str, date: date | None = None):
+            assert date == date_cls(2026, 1, 2)
             return {
                 "GN001": ["000001.XSHE"],
                 "GN002": ["000001.XSHE", "300750.XSHE"],
@@ -234,6 +237,34 @@ def test_sync_stock_metadata_imports_jqdata_industries_and_concepts(
             """
             INSERT INTO stock_daily(symbol, date, open, high, low, close, volume, turnover)
             VALUES ('600000', '2026-01-02', 10, 11, 9, 10.5, 1000, 10500)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
+            VALUES ('OLD_INDUSTRY', 'Old Industry', 'industry', 'cached', '2026-01-01T00:00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
+            VALUES ('OLD_CONCEPT', 'Old Concept', 'concept', 'cached', '2026-01-01T00:00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_basic(
+                symbol, code, name, status, stock_type, market, list_date, out_date,
+                industry_board_code, industry_board_name,
+                concept_board_codes_json, concept_board_names_json,
+                board_updated_at, updated_at
+            )
+            VALUES (
+                '600000', 'SH.600000', 'Stale Bank', '1', '1', 'SH', '1999-11-10', '',
+                'OLD_INDUSTRY', 'Old Industry',
+                '["OLD_CONCEPT"]', '["Old Concept"]',
+                '2026-01-01T00:00:00', '2026-01-01T00:00:00'
+            )
             """
         )
         conn.commit()
@@ -265,6 +296,13 @@ def test_sync_stock_metadata_imports_jqdata_industries_and_concepts(
         members = conn.execute(
             "SELECT symbol, board_name, board_type FROM stock_board_members ORDER BY board_type, board_name, symbol"
         ).fetchall()
+        stale_basic = conn.execute(
+            """
+            SELECT industry_board_name, concept_board_names_json
+            FROM stock_basic
+            WHERE symbol = '600000'
+            """
+        ).fetchone()
 
     assert result["boards"] == 3
     assert result["members"] == 4
@@ -276,6 +314,84 @@ def test_sync_stock_metadata_imports_jqdata_industries_and_concepts(
         ("000001", "金融", "industry"),
         ("600000", "金融", "industry"),
     ]
+    assert stale_basic == ("金融", None)
+
+
+def test_sync_stock_metadata_uses_jqdata_allowed_date_range(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    allowed_date = date(2026, 2, 16)
+
+    class RangeLimitedJQData:
+        def __init__(self) -> None:
+            self.industry_dates: list[date | None] = []
+            self.industry_stock_dates: list[date | None] = []
+            self.concept_stock_dates: list[date | None] = []
+
+        def get_industries(self, name: str, date: date | None = None):
+            self.industry_dates.append(date)
+            if date != allowed_date:
+                raise Exception("only 2025-02-09 to 2026-02-16 allowed")
+            return pd.DataFrame([{"name": "Finance"}], index=["HY001"])
+
+        def get_industry_stocks(self, code: str, date: date | None = None):
+            self.industry_stock_dates.append(date)
+            return ["000001.XSHE"]
+
+        def get_concepts(self):
+            return pd.DataFrame([{"name": "Low Price"}], index=["GN001"])
+
+        def get_concept_stocks(self, code: str, date: date | None = None):
+            self.concept_stock_dates.append(date)
+            return ["000001.XSHE"]
+
+    fake_jq = RangeLimitedJQData()
+    engine = DataEngine(
+        Settings(
+            db_path=str(tmp_path / "jqdata-date-range.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+            jqdata_username="user",
+            jqdata_password="password",
+            jqdata_industry="sw_l1",
+        )
+    )
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO stock_daily(symbol, date, open, high, low, close, volume, turnover)
+            VALUES ('000001', '2026-05-15', 10, 11, 9, 10.5, 1000, 10500)
+            """
+        )
+        conn.commit()
+
+    monkeypatch.setattr(
+        engine,
+        "sync_stock_basic",
+        lambda: [
+            {
+                "symbol": "000001",
+                "code": "SZ.000001",
+                "name": "Sample Bank",
+                "status": "1",
+                "stock_type": "1",
+                "market": "SZ",
+                "list_date": "1991-04-03",
+                "out_date": "",
+            }
+        ],
+    )
+    monkeypatch.setattr(engine, "_get_jqdata_client", lambda: fake_jq)
+
+    result = engine.sync_stock_metadata()
+
+    assert result["board_failures"] == 0
+    assert result["boards"] == 2
+    assert result["members"] == 2
+    assert fake_jq.industry_dates == [date(2026, 5, 15), allowed_date]
+    assert fake_jq.industry_stock_dates == [allowed_date]
+    assert fake_jq.concept_stock_dates == [allowed_date]
 
 
 def test_sync_stock_metadata_preserves_cache_when_jqdata_credentials_missing(
@@ -287,6 +403,8 @@ def test_sync_stock_metadata_preserves_cache_when_jqdata_credentials_missing(
             db_path=str(tmp_path / "jqdata-missing-credentials.db"),
             start_date="2024-01-01",
             feishu_webhook_url="https://example.com/hook",
+            jqdata_username="",
+            jqdata_password="",
         )
     )
     with sqlite3.connect(engine.db_path) as conn:
@@ -334,6 +452,8 @@ def test_sync_stock_metadata_preserves_cache_when_jqdata_credentials_missing(
         member_count = conn.execute("SELECT COUNT(*) FROM stock_board_members").fetchone()[0]
 
     assert result["board_failures"] == 2
+    assert len(result["board_errors"]) == 2
+    assert "JQDATA_USERNAME" in result["board_errors"][0]
     assert board_count == 1
     assert member_count == 1
 

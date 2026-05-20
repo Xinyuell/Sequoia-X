@@ -63,6 +63,8 @@ JQDATA_PASSWORD=你的JoinQuant密码
 JQDATA_INDUSTRY=jq_l1
 ```
 
+请只把真实账号密码填到 `.env`，不要填到 `.env.example`；`.env.example` 是 Git 跟踪的模板文件。
+
 `JQDATA_INDUSTRY=jq_l1` 表示聚宽一级行业；如需申万一级行业，可改为 `sw_l1`。概念板块使用 JQData 的概念分类列表。`data/stock_board_mapping.example.csv` 仅保留为人工维护映射时的参考样例，当前“同步股票画像”不读取该文件。
 
 ---

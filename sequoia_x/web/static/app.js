@@ -1451,12 +1451,22 @@ function formatJobResult(result) {
     boards: "板块数",
     members: "成分关系",
     board_failures: "板块失败数",
+    board_errors: "板块错误",
     start_date: "起始日期",
     end_date: "结束日期",
     full_refresh: "强制重拉",
   };
+  const formatValue = (value) => {
+    if (typeof value === "number") {
+      return formatNumber(value);
+    }
+    if (Array.isArray(value)) {
+      return value.length ? value.join("；") : "--";
+    }
+    return value;
+  };
   return Object.entries(result)
-    .map(([key, value]) => `${labels[key] || key}: ${typeof value === "number" ? formatNumber(value) : value}`)
+    .map(([key, value]) => `${labels[key] || key}: ${formatValue(value)}`)
     .join("，");
 }
 
