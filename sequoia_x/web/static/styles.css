@@ -408,6 +408,7 @@ h1 {
 select,
 input[type="number"],
 input[type="text"],
+input[type="search"],
 input[type="date"] {
   width: 100%;
   min-height: 40px;
@@ -449,13 +450,18 @@ input:focus {
 
 .filter-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  grid-template-columns: minmax(220px, 0.82fr) minmax(260px, 1fr) minmax(260px, 1fr);
   gap: 12px;
+  align-items: start;
   margin-top: 12px;
 }
 
 .filter-field {
   min-width: 0;
+}
+
+.filter-field-concept {
+  grid-column: span 2;
 }
 
 .filter-grid .field-label > input,
@@ -474,31 +480,121 @@ input:focus {
 
 .checkbox-filter-group {
   display: grid;
-  gap: 8px;
-  min-height: 126px;
+  gap: 10px;
+  min-height: 0;
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;
   background: #fbfcfd;
 }
 
+.filter-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.filter-search {
+  min-height: 34px;
+  padding: 0 9px;
+  font-size: 13px;
+}
+
+.filter-meta {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
 .filter-actions {
   display: flex;
   gap: 8px;
+  justify-content: flex-end;
 }
 
 .filter-option-list {
   display: grid;
-  gap: 4px;
-  max-height: 190px;
+  grid-template-columns: repeat(auto-fill, minmax(116px, 1fr));
+  gap: 6px;
+  max-height: 300px;
   overflow: auto;
-  padding-right: 4px;
+  padding-right: 2px;
+  align-content: start;
+}
+
+.filter-field-concept .filter-option-list {
+  grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+  max-height: 360px;
+}
+
+.filter-field-industry .filter-option-list {
+  grid-template-columns: 1fr;
+  max-height: 360px;
+}
+
+.filter-field-industry .filter-toolbar {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+}
+
+.filter-field-industry .filter-actions {
+  justify-content: flex-start;
+}
+
+.filter-field-market .checkbox-filter-group {
+  gap: 8px;
+}
+
+.filter-field-market .filter-toolbar {
+  grid-template-columns: 1fr auto;
+}
+
+.filter-field-market .filter-option-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-height: none;
 }
 
 .filter-option {
-  min-height: 30px;
+  min-width: 0;
+  min-height: 28px;
   margin: 0;
+  border: 1px solid #e0e5ea;
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: #ffffff;
   font-size: 13px;
+  line-height: 1.25;
+  overflow: hidden;
+}
+
+.filter-option[hidden],
+.filter-no-results[hidden] {
+  display: none;
+}
+
+.filter-option input {
+  flex: 0 0 auto;
+}
+
+.filter-option:has(input:checked) {
+  border-color: rgba(18, 106, 94, 0.38);
+  background: #eef8f5;
+}
+
+.filter-option span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filter-no-results {
+  grid-column: 1 / -1;
+  min-height: 40px;
+  align-content: center;
+  text-align: center;
 }
 
 .filter-empty {
@@ -1094,6 +1190,10 @@ tbody tr.selected {
     grid-template-columns: 1fr 1fr;
   }
 
+  .filter-field-concept {
+    grid-column: span 2;
+  }
+
   .report-hero,
   .report-band {
     grid-template-columns: 1fr;
@@ -1128,6 +1228,21 @@ tbody tr.selected {
   .detail-stat-grid,
   .job-panel {
     grid-template-columns: 1fr;
+  }
+
+  .filter-field-concept {
+    grid-column: span 1;
+  }
+
+  .filter-toolbar,
+  .filter-field-market .filter-toolbar {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .filter-meta,
+  .filter-actions {
+    justify-content: flex-start;
   }
 
   .stock-list-head,

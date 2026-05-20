@@ -13,6 +13,7 @@ const state = {
   resultSeriesStock: null,
   resultWindowSize: 120,
   stockFilterOptions: { industries: [], concepts: [], markets: [] },
+  filterQueries: {},
 };
 
 const numberFormatter = new Intl.NumberFormat("zh-CN");
@@ -591,10 +592,22 @@ function renderCheckboxGroup(id, options, valueKey, labelKey) {
     return;
   }
 
+  const groupLabel = container.getAttribute("aria-label") || "筛选项";
+  const query = state.filterQueries[id] || "";
+  const searchable = options.length > 8;
+
   container.innerHTML = `
-    <div class="filter-actions">
-      <button type="button" class="mini-button secondary" data-filter-action="all">全选</button>
-      <button type="button" class="mini-button secondary" data-filter-action="none">全不选</button>
+    <div class="filter-toolbar">
+      ${
+        searchable
+          ? `<input class="filter-search" type="search" value="${escapeHtml(query)}" placeholder="搜索${escapeHtml(groupLabel)}名称/代码" aria-label="搜索${escapeHtml(groupLabel)}" autocomplete="off" data-filter-search />`
+          : ""
+      }
+      <div class="filter-meta" data-filter-summary></div>
+      <div class="filter-actions">
+        <button type="button" class="mini-button secondary" data-filter-action="all">全选可见</button>
+        <button type="button" class="mini-button secondary" data-filter-action="none">全不选可见</button>
+      </div>
     </div>
     <div class="filter-option-list">
       ${options
@@ -603,27 +616,75 @@ function renderCheckboxGroup(id, options, valueKey, labelKey) {
           const label = String(option[labelKey] || value);
           const inputId = `${id}_${index}`;
           const checked = defaultChecked || selected.has(value) ? "checked" : "";
+          const searchText = `${label} ${value}`.toLowerCase();
           return `
-            <label class="checkbox-row filter-option" for="${escapeHtml(inputId)}">
+            <label class="checkbox-row filter-option" for="${escapeHtml(inputId)}" data-filter-option data-filter-text="${escapeHtml(searchText)}" title="${escapeHtml(label)}">
               <input id="${escapeHtml(inputId)}" type="checkbox" value="${escapeHtml(value)}" ${checked} />
               <span>${escapeHtml(label)}</span>
             </label>
           `;
         })
         .join("")}
+      <div class="muted filter-no-results" hidden>没有匹配项</div>
     </div>
   `;
   container.querySelectorAll("[data-filter-action]").forEach((button) => {
     button.addEventListener("click", () => {
-      setCheckboxGroupChecked(id, button.dataset.filterAction === "all");
+      setCheckboxGroupChecked(id, button.dataset.filterAction === "all", true);
     });
   });
+  container.querySelectorAll('input[type="checkbox"]').forEach((input) => {
+    input.addEventListener("change", () => updateCheckboxFilterSummary(container));
+  });
+  const searchInput = container.querySelector("[data-filter-search]");
+  if (searchInput) {
+    searchInput.addEventListener("input", () => {
+      state.filterQueries[id] = searchInput.value;
+      applyCheckboxFilter(container, id);
+    });
+  }
+  applyCheckboxFilter(container, id);
 }
 
-function setCheckboxGroupChecked(id, checked) {
-  byId(id).querySelectorAll('input[type="checkbox"]').forEach((input) => {
-    input.checked = checked;
+function applyCheckboxFilter(container, id) {
+  const query = (state.filterQueries[id] || "").trim().toLowerCase();
+  const options = Array.from(container.querySelectorAll("[data-filter-option]"));
+  let visibleCount = 0;
+  options.forEach((option) => {
+    const matches = !query || option.dataset.filterText.includes(query);
+    option.hidden = !matches;
+    if (matches) {
+      visibleCount += 1;
+    }
   });
+  const empty = container.querySelector(".filter-no-results");
+  if (empty) {
+    empty.hidden = visibleCount !== 0;
+  }
+  updateCheckboxFilterSummary(container, visibleCount);
+}
+
+function updateCheckboxFilterSummary(container, visibleCount = null) {
+  const inputs = Array.from(container.querySelectorAll('input[type="checkbox"]'));
+  const selectedCount = inputs.filter((input) => input.checked).length;
+  const currentVisibleCount = visibleCount ?? container.querySelectorAll("[data-filter-option]:not([hidden])").length;
+  const summary = container.querySelector("[data-filter-summary]");
+  if (summary) {
+    summary.textContent = `${selectedCount} 已选 / ${currentVisibleCount} 可见 / ${inputs.length} 总数`;
+  }
+}
+
+function setCheckboxGroupChecked(id, checked, visibleOnly = false) {
+  const container = byId(id);
+  container.querySelectorAll("[data-filter-option]").forEach((option) => {
+    if (!visibleOnly || !option.hidden) {
+      const input = option.querySelector('input[type="checkbox"]');
+      if (input) {
+        input.checked = checked;
+      }
+    }
+  });
+  updateCheckboxFilterSummary(container);
 }
 
 function selectStrategy(key) {
