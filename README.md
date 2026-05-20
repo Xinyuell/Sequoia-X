@@ -53,7 +53,7 @@ Sequoia-X/
 
 ### 行业/概念板块映射
 
-网页爬虫源不稳定时，可以使用本地 CSV 作为股票池筛选的行业和概念映射来源。默认路径是 `data/stock_board_mapping.csv`，也可以通过 `.env` 中的 `BOARD_MAPPING_PATH` 修改。
+网页爬虫源不稳定时，可以使用本地 CSV 作为股票池筛选的行业和概念映射来源。默认路径是 `data/stock_board_mapping.csv`，也可以通过 `.env` 中的 `BOARD_MAPPING_PATH` 修改；示例见 `data/stock_board_mapping.example.csv`。
 
 CSV 至少包含以下列：
 
