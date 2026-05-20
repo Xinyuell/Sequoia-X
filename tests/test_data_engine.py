@@ -179,29 +179,61 @@ def test_stock_filter_options_include_synced_sub_industry_boards(tmp_path) -> No
     assert {"code": "BK0421", "name": "银行"} in options["industries"]
 
 
-def test_sync_stock_metadata_imports_local_board_mapping(
+def test_sync_stock_metadata_imports_jqdata_industries_and_concepts(
     tmp_path,
     monkeypatch,
 ) -> None:
-    mapping_path = tmp_path / "stock_board_mapping.csv"
-    mapping_path.write_text(
-        "symbol,name,一级行业,概念\n"
-        "000001,Sample Bank,银行,大金融;低价股\n",
-        encoding="utf-8",
-    )
+    class FakeJQData:
+        def __init__(self) -> None:
+            self.industry_name = ""
+
+        def get_industries(self, name: str):
+            self.industry_name = name
+            return pd.DataFrame(
+                [{"name": "金融", "start_date": "2005-01-01"}],
+                index=["HY001"],
+            )
+
+        def get_industry_stocks(self, code: str, date: str | None = None):
+            assert code == "HY001"
+            assert date == "2026-01-02"
+            return ["000001.XSHE", "600000.XSHG"]
+
+        def get_concepts(self):
+            return pd.DataFrame(
+                [{"name": "大金融"}, {"name": "低价股"}],
+                index=["GN001", "GN002"],
+            )
+
+        def get_concept_stocks(self, code: str, date: str | None = None):
+            assert date == "2026-01-02"
+            return {
+                "GN001": ["000001.XSHE"],
+                "GN002": ["000001.XSHE", "300750.XSHE"],
+            }[code]
+
+    fake_jq = FakeJQData()
     engine = DataEngine(
         Settings(
-            db_path=str(tmp_path / "local-board-mapping.db"),
+            db_path=str(tmp_path / "jqdata-board-mapping.db"),
             start_date="2024-01-01",
             feishu_webhook_url="https://example.com/hook",
-            board_mapping_path=str(mapping_path),
+            jqdata_username="user",
+            jqdata_password="password",
+            jqdata_industry="jq_l1",
         )
     )
     with sqlite3.connect(engine.db_path) as conn:
         conn.execute(
             """
             INSERT INTO stock_daily(symbol, date, open, high, low, close, volume, turnover)
-            VALUES ('000001', '2026-01-01', 10, 11, 9, 10.5, 1000, 10500)
+            VALUES ('000001', '2026-01-02', 10, 11, 9, 10.5, 1000, 10500)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_daily(symbol, date, open, high, low, close, volume, turnover)
+            VALUES ('600000', '2026-01-02', 10, 11, 9, 10.5, 1000, 10500)
             """
         )
         conn.commit()
@@ -222,13 +254,7 @@ def test_sync_stock_metadata_imports_local_board_mapping(
             }
         ],
     )
-    monkeypatch.setattr(
-        engine,
-        "_fetch_tushare_boards",
-        lambda board_type, local_symbols, emit: (_ for _ in ()).throw(
-            AssertionError("local mapping should be used first")
-        ),
-    )
+    monkeypatch.setattr(engine, "_get_jqdata_client", lambda: fake_jq)
 
     result = engine.sync_stock_metadata()
 
@@ -237,44 +263,30 @@ def test_sync_stock_metadata_imports_local_board_mapping(
             "SELECT board_name, board_type FROM stock_boards ORDER BY board_type, board_name"
         ).fetchall()
         members = conn.execute(
-            "SELECT symbol, board_name, board_type FROM stock_board_members "
-            "ORDER BY board_type, board_name"
+            "SELECT symbol, board_name, board_type FROM stock_board_members ORDER BY board_type, board_name, symbol"
         ).fetchall()
 
     assert result["boards"] == 3
-    assert result["members"] == 3
-    assert boards == [("低价股", "concept"), ("大金融", "concept"), ("银行", "industry")]
+    assert result["members"] == 4
+    assert fake_jq.industry_name == "jq_l1"
+    assert boards == [("低价股", "concept"), ("大金融", "concept"), ("金融", "industry")]
     assert members == [
         ("000001", "低价股", "concept"),
         ("000001", "大金融", "concept"),
-        ("000001", "银行", "industry"),
+        ("000001", "金融", "industry"),
+        ("600000", "金融", "industry"),
     ]
 
 
-def test_sync_stock_metadata_uses_tushare_concepts_when_no_local_mapping(
+def test_sync_stock_metadata_preserves_cache_when_jqdata_credentials_missing(
     tmp_path,
     monkeypatch,
 ) -> None:
-    class FakePro:
-        def index_classify(self, **kwargs):
-            return pd.DataFrame()
-
-        def stock_basic(self, **kwargs):
-            return pd.DataFrame()
-
-        def concept(self, **kwargs):
-            return pd.DataFrame([{"code": "TS2", "name": "大金融"}])
-
-        def concept_detail(self, **kwargs):
-            return pd.DataFrame([{"ts_code": "000001.SZ", "name": "Sample Bank"}])
-
     engine = DataEngine(
         Settings(
-            db_path=str(tmp_path / "tushare-concept.db"),
+            db_path=str(tmp_path / "jqdata-missing-credentials.db"),
             start_date="2024-01-01",
             feishu_webhook_url="https://example.com/hook",
-            tushare_token="test-token",
-            board_mapping_path=str(tmp_path / "missing.csv"),
         )
     )
     with sqlite3.connect(engine.db_path) as conn:
@@ -282,6 +294,18 @@ def test_sync_stock_metadata_uses_tushare_concepts_when_no_local_mapping(
             """
             INSERT INTO stock_daily(symbol, date, open, high, low, close, volume, turnover)
             VALUES ('000001', '2026-01-01', 10, 11, 9, 10.5, 1000, 10500)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
+            VALUES ('GN001', '大金融', 'concept', 'cached', '2026-05-20T00:00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO stock_board_members(symbol, board_code, board_type, board_name, source, fetched_at)
+            VALUES ('000001', 'GN001', 'concept', '大金融', 'cached', '2026-05-20T00:00:00')
             """
         )
         conn.commit()
@@ -302,21 +326,16 @@ def test_sync_stock_metadata_uses_tushare_concepts_when_no_local_mapping(
             }
         ],
     )
-    monkeypatch.setattr(engine, "_get_ts_pro", lambda: FakePro())
 
     result = engine.sync_stock_metadata()
 
     with sqlite3.connect(engine.db_path) as conn:
-        concept_boards = conn.execute(
-            "SELECT board_code, board_name FROM stock_boards WHERE board_type = 'concept'"
-        ).fetchall()
-        concept_members = conn.execute(
-            "SELECT symbol, board_code FROM stock_board_members WHERE board_type = 'concept'"
-        ).fetchall()
+        board_count = conn.execute("SELECT COUNT(*) FROM stock_boards").fetchone()[0]
+        member_count = conn.execute("SELECT COUNT(*) FROM stock_board_members").fetchone()[0]
 
-    assert result["members"] == 1
-    assert concept_boards == [("TS:TS2", "大金融")]
-    assert concept_members == [("000001", "TS:TS2")]
+    assert result["board_failures"] == 2
+    assert board_count == 1
+    assert member_count == 1
 
 
 def test_normalize_stock_symbol_handles_common_exchange_formats() -> None:

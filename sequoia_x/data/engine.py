@@ -316,7 +316,9 @@ class DataEngine:
         self.db_path: str = settings.db_path
         self.start_date: str = settings.start_date
         self.tushare_token: str = settings.tushare_token
-        self.board_mapping_path: str = settings.board_mapping_path
+        self.jqdata_username: str = settings.jqdata_username
+        self.jqdata_password: str = settings.jqdata_password
+        self.jqdata_industry: str = settings.jqdata_industry
         self._ts_pro = None
         self._init_db()
 
@@ -1376,226 +1378,123 @@ class DataEngine:
         local_symbols: set[str],
         emit: Callable[..., None],
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        boards, members = self._fetch_local_board_mapping(board_type, local_symbols)
-        if boards and members:
-            emit(
-                f"已读取本地{_board_type_label(board_type)}映射",
-                current_action="读取本地板块映射",
-                boards=len(boards),
-                members=len(members),
-            )
-            return boards, members
-        return self._fetch_tushare_boards(board_type, local_symbols, emit)
-
-    def _fetch_local_board_mapping(
-        self,
-        board_type: str,
-        local_symbols: set[str],
-    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        path = Path(self.board_mapping_path)
-        if not path.exists():
+        jq = self._get_jqdata_client()
+        if jq is None:
             return [], []
-
-        try:
-            df = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
-        except UnicodeDecodeError:
-            df = pd.read_csv(path, dtype=str, encoding="gbk")
-        except Exception as exc:
-            logger.warning(f"本地板块映射读取失败: {path} {exc}")
-            return [], []
-
-        symbol_col = _find_column(df, ["symbol", "股票代码", "代码", "ts_code", "证券代码"])
+        reference_date = self._latest_local_date()
         if board_type == "industry":
-            board_col = _find_column(
-                df,
-                ["industry_board_name", "industry", "一级行业", "行业", "申万一级行业"],
-            )
-        else:
-            board_col = _find_column(
-                df,
-                [
-                    "concept_board_names",
-                    "concept_board_names_json",
-                    "concepts",
-                    "概念板块",
-                    "概念",
-                ],
-            )
-        if not symbol_col or not board_col:
-            return [], []
+            return self._fetch_jqdata_industries(jq, local_symbols, emit, reference_date)
+        return self._fetch_jqdata_concepts(jq, local_symbols, emit, reference_date)
 
-        boards_by_code: dict[str, str] = {}
-        member_keys: set[tuple[str, str]] = set()
-        members: list[dict[str, str]] = []
-        for _, row in df.iterrows():
-            symbol = _normalize_stock_symbol(row.get(symbol_col))
-            if symbol not in local_symbols:
-                continue
-            for board_name in _split_board_names(row.get(board_col)):
-                board_code = _stable_board_code(board_type, board_name)
-                boards_by_code[board_code] = board_name
-                key = (symbol, board_code)
-                if key in member_keys:
-                    continue
-                member_keys.add(key)
-                members.append(
-                    {
-                        "symbol": symbol,
-                        "board_code": board_code,
-                        "board_name": board_name,
-                    }
-                )
-        boards = [
-            {"board_code": board_code, "board_name": board_name}
-            for board_code, board_name in sorted(boards_by_code.items(), key=lambda item: item[1])
-        ]
-        return boards, members
+    def _get_jqdata_client(self) -> Any | None:
+        if not self.jqdata_username or not self.jqdata_password:
+            logger.warning("未配置 JQDATA_USERNAME/JQDATA_PASSWORD，无法同步行业和概念板块")
+            return None
+        try:
+            import jqdatasdk as jq
+        except ImportError as exc:
+            logger.warning(f"未安装 jqdatasdk，无法同步 JoinQuant 板块数据: {exc}")
+            return None
+        try:
+            jq.auth(self.jqdata_username, self.jqdata_password)
+        except Exception as exc:
+            logger.warning(f"JoinQuant 登录失败: {exc}")
+            return None
+        return jq
 
-    def _fetch_tushare_boards(
+    def _latest_local_date(self) -> str | None:
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT MAX(date) FROM stock_daily").fetchone()
+        return str(row[0]) if row and row[0] else None
+
+    def _fetch_jqdata_industries(
         self,
-        board_type: str,
+        jq: Any,
         local_symbols: set[str],
         emit: Callable[..., None],
-    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        pro = self._get_ts_pro()
-        if pro is None:
-            logger.warning(f"未配置 TUSHARE_TOKEN，无法同步{_board_type_label(board_type)}板块")
-            return [], []
-        if board_type == "industry":
-            return self._fetch_tushare_industries(pro, local_symbols, emit)
-        return self._fetch_tushare_concepts(pro, local_symbols, emit)
-
-    def _fetch_tushare_industries(
-        self,
-        pro: Any,
-        local_symbols: set[str],
-        emit: Callable[..., None],
+        reference_date: str | None,
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
         try:
-            board_df = pro.index_classify(level="L1", src="SW2021")
+            board_df = jq.get_industries(name=self.jqdata_industry)
         except Exception as exc:
-            logger.warning(f"Tushare 申万一级行业同步失败，尝试 stock_basic 行业字段: {exc}")
-            return self._fetch_tushare_stock_basic_industries(pro, local_symbols)
-
-        if board_df is None or board_df.empty:
-            return self._fetch_tushare_stock_basic_industries(pro, local_symbols)
-
-        boards: list[dict[str, str]] = []
-        members: list[dict[str, str]] = []
-        total = len(board_df)
-        for index, (_, row) in enumerate(board_df.iterrows(), start=1):
-            board_code = _pick_text(row, ["index_code", "industry_code", "code"])
-            board_name = _pick_text(row, ["industry_name", "name", "板块名称"])
-            if not board_code or not board_name:
-                continue
-            board_code = f"TS:{board_code}"
-            emit(
-                f"正在同步{board_name}成分股",
-                total=total,
-                processed=index - 1,
-                current_action="同步 Tushare 行业成分",
-            )
-            try:
-                member_df = pro.index_member(index_code=board_code.removeprefix("TS:"))
-            except Exception as exc:
-                logger.warning(f"[{board_name}] Tushare 行业成分同步失败: {exc}")
-                continue
-            boards.append({"board_code": board_code, "board_name": board_name})
-            members.extend(
-                _board_members_from_df(
-                    member_df,
-                    board_code,
-                    board_name,
-                    local_symbols,
-                    ["con_code", "ts_code", "symbol", "代码"],
-                )
-            )
-        return boards, members
-
-    def _fetch_tushare_stock_basic_industries(
-        self,
-        pro: Any,
-        local_symbols: set[str],
-    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        try:
-            df = pro.stock_basic(
-                exchange="",
-                list_status="L",
-                fields="ts_code,symbol,name,industry",
-            )
-        except Exception as exc:
-            logger.warning(f"Tushare stock_basic 行业字段同步失败: {exc}")
-            return [], []
-        if df is None or df.empty:
-            return [], []
-
-        boards_by_code: dict[str, str] = {}
-        members: list[dict[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for _, row in df.iterrows():
-            symbol = _normalize_stock_symbol(_pick_text(row, ["symbol", "ts_code"]))
-            board_name = _pick_text(row, ["industry"])
-            if symbol not in local_symbols or not board_name:
-                continue
-            board_code = _stable_board_code("industry", board_name)
-            boards_by_code[board_code] = board_name
-            key = (symbol, board_code)
-            if key in seen:
-                continue
-            seen.add(key)
-            members.append(
-                {
-                    "symbol": symbol,
-                    "board_code": board_code,
-                    "board_name": board_name,
-                }
-            )
-        boards = [
-            {"board_code": board_code, "board_name": board_name}
-            for board_code, board_name in sorted(boards_by_code.items(), key=lambda item: item[1])
-        ]
-        return boards, members
-
-    def _fetch_tushare_concepts(
-        self,
-        pro: Any,
-        local_symbols: set[str],
-        emit: Callable[..., None],
-    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        try:
-            board_df = pro.concept(src="ts")
-        except Exception as exc:
-            logger.warning(f"Tushare 概念板块同步失败: {exc}")
-            return [], []
-        if board_df is None or board_df.empty:
+            logger.warning(f"JoinQuant 一级行业列表同步失败: {exc}")
             return [], []
 
         boards: list[dict[str, str]] = []
         members: list[dict[str, str]] = []
-        total = len(board_df)
-        for index, (_, row) in enumerate(board_df.iterrows(), start=1):
-            raw_board_code = _pick_text(row, ["code", "id", "concept_id"])
-            board_name = _pick_text(row, ["name", "concept_name", "板块名称"])
-            if not raw_board_code or not board_name:
-                continue
-            board_code = f"TS:{raw_board_code}"
+        board_items = list(
+            _jq_board_items(
+                board_df,
+                code_columns=["industry_code", "code", "index_code"],
+                name_columns=["industry_name", "name", "板块名称"],
+            )
+        )
+        total = len(board_items)
+        for index, (raw_board_code, board_name) in enumerate(board_items, start=1):
+            board_code = f"JQ:{raw_board_code}"
             emit(
                 f"正在同步{board_name}成分股",
                 total=total,
                 processed=index - 1,
-                current_action="同步 Tushare 概念成分",
+                current_action="同步 JoinQuant 一级行业成分",
             )
             try:
-                member_df = pro.concept_detail(id=raw_board_code)
+                stock_codes = jq.get_industry_stocks(raw_board_code, date=reference_date)
             except Exception as exc:
-                logger.warning(f"[{board_name}] Tushare 概念成分同步失败: {exc}")
+                logger.warning(f"[{board_name}] JoinQuant 行业成分同步失败: {exc}")
                 continue
-            board_members = _board_members_from_df(
-                member_df,
+            board_members = _board_members_from_codes(
+                stock_codes,
                 board_code,
                 board_name,
                 local_symbols,
-                ["ts_code", "symbol", "代码"],
+            )
+            if board_members:
+                boards.append({"board_code": board_code, "board_name": board_name})
+                members.extend(board_members)
+        return boards, members
+
+    def _fetch_jqdata_concepts(
+        self,
+        jq: Any,
+        local_symbols: set[str],
+        emit: Callable[..., None],
+        reference_date: str | None,
+    ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        try:
+            board_df = jq.get_concepts()
+        except Exception as exc:
+            logger.warning(f"JoinQuant 概念板块列表同步失败: {exc}")
+            return [], []
+
+        boards: list[dict[str, str]] = []
+        members: list[dict[str, str]] = []
+        board_items = list(
+            _jq_board_items(
+                board_df,
+                code_columns=["concept_code", "code", "id"],
+                name_columns=["concept_name", "name", "板块名称"],
+            )
+        )
+        total = len(board_items)
+        for index, (raw_board_code, board_name) in enumerate(board_items, start=1):
+            board_code = f"JQ:{raw_board_code}"
+            emit(
+                f"正在同步{board_name}成分股",
+                total=total,
+                processed=index - 1,
+                current_action="同步 JoinQuant 概念成分",
+            )
+            try:
+                stock_codes = jq.get_concept_stocks(raw_board_code, date=reference_date)
+            except Exception as exc:
+                logger.warning(f"[{board_name}] JoinQuant 概念成分同步失败: {exc}")
+                continue
+            board_members = _board_members_from_codes(
+                stock_codes,
+                board_code,
+                board_name,
+                local_symbols,
             )
             if board_members:
                 boards.append({"board_code": board_code, "board_name": board_name})
@@ -1613,7 +1512,7 @@ class DataEngine:
             conn.executemany(
                 """
                 INSERT INTO stock_boards(board_code, board_name, board_type, source, fetched_at)
-                VALUES (?, ?, ?, 'board_mapping', ?)
+                VALUES (?, ?, ?, 'jqdata', ?)
                 ON CONFLICT(board_type, board_code) DO UPDATE SET
                     board_name = excluded.board_name,
                     source = excluded.source,
@@ -1629,7 +1528,7 @@ class DataEngine:
                 """
                 INSERT OR REPLACE INTO stock_board_members
                     (symbol, board_code, board_type, board_name, source, fetched_at)
-                VALUES (?, ?, ?, ?, 'board_mapping', ?)
+                VALUES (?, ?, ?, ?, 'jqdata', ?)
                 """,
                 [
                     (
@@ -2248,58 +2147,62 @@ def _board_type_label(board_type: str) -> str:
     return "行业" if board_type == "industry" else "概念"
 
 
-def _find_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    normalized = {str(column).strip().lower(): column for column in df.columns}
-    for candidate in candidates:
-        column = normalized.get(candidate.strip().lower())
-        if column is not None:
-            return str(column)
-    return None
-
-
-def _split_board_names(value: object) -> list[str]:
-    import re
-
-    if value is None or pd.isna(value):
+def _jq_board_items(
+    boards: Any,
+    code_columns: list[str],
+    name_columns: list[str],
+) -> list[tuple[str, str]]:
+    if boards is None:
         return []
-    text = str(value).strip()
-    if not text or text in {"None", "nan", "NaT", "[]"}:
+    if isinstance(boards, dict):
+        items: list[tuple[str, str]] = []
+        for code, value in boards.items():
+            if isinstance(value, dict):
+                name = _pick_text(value, name_columns)
+            else:
+                name = str(value).strip()
+            if str(code).strip() and name:
+                items.append((str(code).strip(), name))
+        return items
+    if not isinstance(boards, pd.DataFrame) or boards.empty:
         return []
-    if text.startswith("["):
-        try:
-            decoded = json.loads(text)
-            if isinstance(decoded, list):
-                return [str(item).strip() for item in decoded if str(item).strip()]
-        except json.JSONDecodeError:
-            pass
-    parts = re.split(r"[,，;；|、/]\s*", text)
-    return [part.strip() for part in parts if part.strip()]
+
+    items = []
+    for index, row in boards.iterrows():
+        code = _pick_text(row, code_columns) or str(index).strip()
+        name = _pick_text(row, name_columns)
+        if code and name:
+            items.append((code, name))
+    return items
 
 
-def _stable_board_code(board_type: str, board_name: str) -> str:
-    import hashlib
-
-    prefix = "LOCAL:IND" if board_type == "industry" else "LOCAL:CON"
-    digest = hashlib.sha1(board_name.encode("utf-8")).hexdigest()[:10]
-    return f"{prefix}:{digest}"
-
-
-def _board_members_from_df(
-    df: pd.DataFrame | None,
+def _board_members_from_codes(
+    codes: Any,
     board_code: str,
     board_name: str,
     local_symbols: set[str],
-    symbol_columns: list[str],
 ) -> list[dict[str, str]]:
-    if df is None or df.empty:
+    if codes is None:
         return []
+    if isinstance(codes, pd.DataFrame):
+        for column in ("code", "ts_code", "symbol"):
+            if column in codes.columns:
+                values = codes[column].tolist()
+                break
+        else:
+            values = codes.iloc[:, 0].tolist()
+    elif isinstance(codes, pd.Series):
+        values = codes.tolist()
+    else:
+        try:
+            values = list(codes)
+        except TypeError:
+            values = [codes]
+
     members: list[dict[str, str]] = []
     seen: set[str] = set()
-    for _, row in df.iterrows():
-        out_date = _pick_text(row, ["out_date", "OUT_DATE", "退市日期"])
-        if out_date and out_date not in {"None", "nan", "NaT"}:
-            continue
-        symbol = _normalize_stock_symbol(_pick_text(row, symbol_columns))
+    for code in values:
+        symbol = _normalize_stock_symbol(code)
         if symbol not in local_symbols or symbol in seen:
             continue
         seen.add(symbol)

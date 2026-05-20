@@ -53,17 +53,17 @@ Sequoia-X/
 
 ### 行业/概念板块映射
 
-网页爬虫源不稳定时，可以使用本地 CSV 作为股票池筛选的行业和概念映射来源。默认路径是 `data/stock_board_mapping.csv`，也可以通过 `.env` 中的 `BOARD_MAPPING_PATH` 修改；示例见 `data/stock_board_mapping.example.csv`。
+股票画像同步使用 JoinQuant/JQData 官方数据库拉取一级行业和概念板块成分，并写入本地 SQLite 的 `stock_boards` 与 `stock_board_members`。WebUI 的行业板块和概念板块筛选项直接读取这两张本地表。
 
-CSV 至少包含以下列：
+在项目根目录 `.env` 中填写：
 
-```csv
-symbol,name,一级行业,概念
-000001,平安银行,银行,大金融;低价股
-600519,贵州茅台,食品饮料,白酒;核心资产
+```env
+JQDATA_USERNAME=你的JoinQuant账号
+JQDATA_PASSWORD=你的JoinQuant密码
+JQDATA_INDUSTRY=jq_l1
 ```
 
-支持的列名包括 `symbol`/`股票代码`/`代码`，`一级行业`/`行业`，以及 `概念`/`概念板块`/`concepts`。概念多个值可用 `;`、`,`、`，`、`、` 分隔。同步股票画像时会优先读取这个本地文件；如果文件不存在，再尝试 Tushare Pro 的行业/概念正式 API。
+`JQDATA_INDUSTRY=jq_l1` 表示聚宽一级行业；如需申万一级行业，可改为 `sw_l1`。概念板块使用 JQData 的概念分类列表。`data/stock_board_mapping.example.csv` 仅保留为人工维护映射时的参考样例，当前“同步股票画像”不读取该文件。
 
 ---
 
